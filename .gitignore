@@ -1,0 +1,10 @@
+.direnv/
+node_modules
+dist
+.vite
+.npm
+.agent-browser
+.playwright-browsers
+data/*
+!data/.gitkeep
+artifacts/*
