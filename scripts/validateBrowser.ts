@@ -216,6 +216,73 @@ async function assertExecutionFailed() {
   );
 }
 
+async function injectApproval(kind: 'commandExecution' | 'fileChange') {
+  const threadId = readEvalString(
+    await browserEval(
+      "document.querySelector('.thread-metadata code')?.textContent?.trim() ?? '';",
+      true,
+    ),
+  );
+  if (!threadId) {
+    throw new Error('Expected a live thread id before injecting an approval fixture.');
+  }
+
+  await postJson(`/api/dev/live-sessions/${encodeURIComponent(threadId)}/approvals/inject`, { kind });
+}
+
+async function assertApprovalCard(kind: 'commandExecution' | 'fileChange', status: 'pending' | 'answered') {
+  await browserEval(
+    [
+      `const kind = ${JSON.stringify(kind)};`,
+      `const status = ${JSON.stringify(status)};`,
+      "const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"${status}\"]`);",
+      "if (!card) throw new Error(`Missing approval card for ${kind} with status ${status}.`);",
+      "if (!card.textContent?.includes('Thread')) throw new Error('Approval card should show thread details.');",
+      "if (!card.textContent?.includes('Turn')) throw new Error('Approval card should show turn details.');",
+      "if (!card.textContent?.includes('Item')) throw new Error('Approval card should show item details.');",
+      "if (kind === 'commandExecution' && !card.textContent?.includes('npm test -- --runInBand')) {",
+      "  throw new Error('Command approval should show the proposed command.');",
+      '}',
+      "if (kind === 'fileChange' && !card.textContent?.includes('src/validation.js')) {",
+      "  throw new Error('File change approval should show the proposed file path.');",
+      '}',
+    ].join(' '),
+  );
+}
+
+async function answerApproval(kind: 'commandExecution' | 'fileChange', decision: 'accept' | 'decline') {
+  await browserEval(
+    [
+      '(async () => {',
+      `  const kind = ${JSON.stringify(kind)};`,
+      `  const decision = ${JSON.stringify(decision)};`,
+      "  const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"pending\"]`);",
+      "  if (!card) throw new Error(`Missing pending approval for ${kind}.`);",
+      "  const button = [...card.querySelectorAll('button')].find((node) => node.textContent?.trim() === (decision === 'accept' ? 'Accept' : 'Decline'));",
+      "  if (!(button instanceof HTMLElement)) throw new Error(`Missing ${decision} button for ${kind}.`);",
+      "  button.click();",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 300));',
+      '})()',
+    ].join(' '),
+  );
+
+  await browserEval(
+    [
+      '(async () => {',
+      `  const kind = ${JSON.stringify(kind)};`,
+      `  const expected = ${JSON.stringify(decision === 'accept' ? 'Accepted' : 'Declined')};`,
+      '  const deadline = Date.now() + 8000;',
+      '  while (Date.now() < deadline) {',
+      "    const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"answered\"]`);",
+      "    if (card && card.textContent?.includes(expected)) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 200));',
+      '  }',
+      "  throw new Error(`Approval ${kind} did not transition to answered state.`);",
+      '})()',
+    ].join(' '),
+  );
+}
+
 async function assertCodexReplayKinds(role: string, expectedKinds: string[]) {
   await browserEval(
     [
@@ -361,6 +428,14 @@ try {
     ].join(' '),
   );
   await assertExecutionLaunched();
+  await injectApproval('commandExecution');
+  await assertApprovalCard('commandExecution', 'pending');
+  await answerApproval('commandExecution', 'accept');
+  await assertApprovalCard('commandExecution', 'answered');
+  await injectApproval('fileChange');
+  await assertApprovalCard('fileChange', 'pending');
+  await answerApproval('fileChange', 'decline');
+  await assertApprovalCard('fileChange', 'answered');
 
   await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);

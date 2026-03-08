@@ -156,6 +156,29 @@ export type CodexThread = {
   turns: CodexTurn[];
 };
 
+export type CodexLiveApproval = {
+  request_id: number;
+  thread_id: string;
+  turn_id: string | null;
+  item_id: string | null;
+  request_method: string;
+  approval_kind: 'commandExecution' | 'fileChange' | 'other';
+  status: 'pending' | 'answered';
+  requested_at: string;
+  answered_at: string | null;
+  decision: 'accept' | 'decline' | null;
+  reason?: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  command_actions?: unknown[];
+  available_decisions?: string[];
+  changes?: CodexFileChangeEntry[];
+  additional_permissions?: unknown;
+  network_approval_context?: unknown;
+  raw_params?: unknown;
+  synthetic?: boolean;
+};
+
 export type CodexSessionView = {
   id: string;
   role: string;
@@ -177,6 +200,7 @@ export type CodexSessionView = {
   } | null;
   thread: CodexThread | null;
   load_error: string | null;
+  approvals: CodexLiveApproval[];
 };
 
 export type ChangeUnitExecutionIdle = {
@@ -226,3 +250,7 @@ export type ChangeUnitListResponse = {
 };
 
 export type ExecuteNextActionResult = ChangeUnitExecutionLaunched;
+
+export type RespondApprovalResult = {
+  approval: CodexLiveApproval;
+};

@@ -7,6 +7,7 @@ import type {
   ChangeUnitDetail,
   ChangeUnitExecutionLaunched,
   ExecuteNextActionResult,
+  RespondApprovalResult,
 } from '../shared/api.ts';
 import { getChangeUnitDetail, listChangeUnits } from './changeUnits.ts';
 import { AppServerProcess } from './appServerProcess.ts';
@@ -19,11 +20,13 @@ import {
   loadBundlesFromRoots,
   persistImportedBundle,
 } from './importBundles.ts';
+import { LiveApprovalStore } from './liveApprovalStore.ts';
 
 const config = readConfig(process.env);
 const appServer = new AppServerProcess({ codexBin: config.codexBin });
 const executionStateStore = new ExecutionStateStore(config.runtimeRoot);
 const liveSessionSubscribers = new Map<string, Set<express.Response>>();
+const liveApprovalStore = new LiveApprovalStore();
 
 let appServerReady: Promise<void> | null = null;
 
@@ -65,6 +68,10 @@ function buildEmptyMessage(state: BundleState) {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
 }
 
 function buildSandboxPolicy() {
@@ -116,6 +123,10 @@ function broadcastLiveSessionEvent(threadId: string, message: Record<string, unk
   }
 }
 
+function broadcastLiveSessionMessage(threadId: string, method: string, params: unknown) {
+  broadcastLiveSessionEvent(threadId, { method, params });
+}
+
 async function ensureAppServerStarted() {
   if (appServer.running) return;
   if (!appServerReady) {
@@ -128,10 +139,29 @@ async function ensureAppServerStarted() {
     appServer.on('serverRequest', (message) => {
       const id = typeof message.id === 'number' ? message.id : null;
       if (id === null) return;
-      void appServer.respondError(id, 'Interactive approvals are not supported by inbox.');
+      const captured = liveApprovalStore.captureServerRequest(message);
+      if (captured) {
+        broadcastLiveSessionMessage(captured.thread_id, 'codex/serverRequest', {
+          id,
+          method: message.method,
+          params: message.params ?? null,
+        });
+        return;
+      }
+
+      void appServer.respondError(id, 'Inbox only supports live approval requests in this build.');
     });
 
     appServer.on('notification', (message) => {
+      if (message.method === 'serverRequest/resolved' && isObject(message.params)) {
+        const threadId = readString(message.params.threadId);
+        const requestId =
+          typeof message.params.requestId === 'number' ? message.params.requestId : null;
+        if (threadId && requestId !== null) {
+          liveApprovalStore.resolve(threadId, requestId);
+        }
+      }
+
       const threadId = getThreadIdFromNotification(message);
       if (!threadId) return;
       broadcastLiveSessionEvent(threadId, message);
@@ -183,6 +213,7 @@ async function buildDetail(detailId: string): Promise<ChangeUnitDetail | null> {
   if (executionState.status === 'launched') {
     const liveSessionView = await buildLiveSessionView({
       execution: executionState,
+      approvals: liveApprovalStore.list(executionState.thread_id),
       ensureAppServerStarted,
       appServerRequest: (method, params) => appServer.request(method, params),
     });
@@ -248,6 +279,8 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
       threadId = extractThreadId(resumeResult);
     }
 
+    liveApprovalStore.clearThread(threadId);
+
     const turnResult = await appServer.request('turn/start', {
       threadId,
       input: [{ type: 'text', text: action.prompt, textElements: [] }],
@@ -282,6 +315,34 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
     });
     throw error;
   }
+}
+
+async function respondToApproval(args: {
+  threadId: string;
+  requestId: number;
+  decision: 'accept' | 'decline';
+}): Promise<RespondApprovalResult> {
+  await ensureAppServerStarted();
+  const approval = await liveApprovalStore.answer({
+    threadId: args.threadId,
+    requestId: args.requestId,
+    decision: args.decision,
+    responder: async (decision) => {
+      if (args.requestId < 0) {
+        return;
+      }
+
+      await appServer.respond(args.requestId, { decision });
+    },
+  });
+
+  broadcastLiveSessionMessage(args.threadId, 'serverRequest/resolved', {
+    threadId: args.threadId,
+    requestId: args.requestId,
+    decision: args.decision,
+  });
+
+  return { approval };
 }
 
 const app = express();
@@ -374,11 +435,72 @@ app.get('/api/live-sessions/:threadId/events', async (req, res) => {
   });
 });
 
+app.post('/api/live-sessions/:threadId/approvals/:requestId/respond', async (req, res) => {
+  const requestId = Number(req.params.requestId);
+  const decision = req.body?.decision;
+
+  if (!Number.isFinite(requestId)) {
+    res.status(400).json({ error: 'invalid_request_id', message: 'Approval request id is invalid.' });
+    return;
+  }
+
+  if (decision !== 'accept' && decision !== 'decline') {
+    res.status(400).json({
+      error: 'invalid_decision',
+      message: 'Approval decision must be accept or decline.',
+    });
+    return;
+  }
+
+  try {
+    const result = await respondToApproval({
+      threadId: req.params.threadId,
+      requestId,
+      decision,
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to answer approval request.';
+    const status =
+      /not found/i.test(message)
+        ? 404
+        : /already been answered/i.test(message)
+          ? 409
+          : 400;
+    res.status(status).json({ error: 'approval_response_failed', message });
+  }
+});
+
 app.post('/api/dev/reseed', async (_req, res) => {
   await clearImportedBundles(config.importedRoot);
   await executionStateStore.clear();
   const bundlePaths = await discoverBundleFiles(config.seedRoot);
   res.json({ imported: bundlePaths.length, reset_to_seed: true });
+});
+
+app.post('/api/dev/live-sessions/:threadId/approvals/inject', async (req, res) => {
+  const approval = liveApprovalStore.injectSynthetic({
+    threadId: req.params.threadId,
+    kind: req.body?.kind === 'fileChange' ? 'fileChange' : 'commandExecution',
+  });
+
+  broadcastLiveSessionMessage(req.params.threadId, 'codex/serverRequest', {
+    id: approval.request_id,
+    method: approval.request_method,
+    params: {
+      threadId: approval.thread_id,
+      turnId: approval.turn_id,
+      itemId: approval.item_id,
+      reason: approval.reason,
+      command: approval.command,
+      cwd: approval.cwd,
+      commandActions: approval.command_actions,
+      availableDecisions: approval.available_decisions,
+      changes: approval.changes,
+    },
+  });
+
+  res.json({ approval });
 });
 
 app.post('/api/change-units/:id/execute-next', async (req, res) => {

@@ -16,6 +16,7 @@ The product is intentionally narrow:
 - one structured tutorial
 - one persisted `Execute Next Prompt` state model
 - one real launched-session surface tied to the reviewed checkpoint
+- inline live-session approvals for command and file-change requests
 
 ## Run
 
@@ -82,6 +83,7 @@ Runtime state stays outside the bundle:
 - linked checkpoint sessions are reconstructed from committed rollout history
 - launched thread metadata and live transcript are attached at read time from Codex app-server
 - the right rail auto-updates launched live sessions from app-server notifications with polling fallback
+- pending live approvals are surfaced inline and answered through the app-server response path
 
 The generated JSON schema lives in
 [`schema/change-unit.bundle.schema.json`](./schema/change-unit.bundle.schema.json).
@@ -108,8 +110,9 @@ paths. The current product does not use the old generated change-unit or SQLite 
 6. verifies linked and live sessions both render through the Codex-native thread viewer
 7. verifies captured file changes render as readable patch history instead of escaped JSON
 8. verifies the launched live session visibly auto-updates in place
-9. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
-10. verifies failed execute-next state renders a real retryable error
+9. verifies inline live approvals render and accept/decline through the backend response path
+10. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
+11. verifies failed execute-next state renders a real retryable error
 
 ## Notes
 

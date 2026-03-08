@@ -2,6 +2,7 @@ import type {
   ChangeUnitDetail,
   ChangeUnitListResponse,
   ExecuteNextActionResult,
+  RespondApprovalResult,
 } from '../../shared/api.ts';
 
 export class RequestError extends Error {
@@ -45,6 +46,21 @@ export async function executeNextAction(id: string): Promise<ExecuteNextActionRe
     { method: 'POST' },
   );
   return response.execution;
+}
+
+export async function respondToLiveApproval(
+  threadId: string,
+  requestId: number,
+  decision: 'accept' | 'decline',
+): Promise<RespondApprovalResult> {
+  return await requestJson<RespondApprovalResult>(
+    `/api/live-sessions/${encodeURIComponent(threadId)}/approvals/${requestId}/respond`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    },
+  );
 }
 
 export async function reseedDemo(): Promise<void> {

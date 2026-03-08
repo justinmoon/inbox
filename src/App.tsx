@@ -5,7 +5,12 @@ import { ChangeUnitSurface } from './components/ChangeUnitSurface.tsx';
 import { HotkeyOverlay } from './components/HotkeyOverlay.tsx';
 import { InboxRail } from './components/InboxRail.tsx';
 import { SessionReplayPanel } from './components/SessionReplayPanel.tsx';
-import { RequestError, fetchChangeUnitDetail, fetchChangeUnits } from './lib/api.ts';
+import {
+  RequestError,
+  fetchChangeUnitDetail,
+  fetchChangeUnits,
+  respondToLiveApproval,
+} from './lib/api.ts';
 import { getSidebarState } from './lib/format.ts';
 
 type LiveSessionUpdates = {
@@ -69,6 +74,8 @@ export function App() {
   const [preferredSessionId, setPreferredSessionId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
+  const [approvalErrorMessage, setApprovalErrorMessage] = useState<string | null>(null);
+  const [respondingApprovalIds, setRespondingApprovalIds] = useState<number[]>([]);
   const [liveSessionUpdates, setLiveSessionUpdates] = useState<LiveSessionUpdates>({
     mode: 'idle',
     threadId: null,
@@ -394,6 +401,28 @@ export function App() {
     await refreshDetail(selectedId);
   }
 
+  async function handleApprovalResponse(
+    threadId: string,
+    requestId: number,
+    decision: 'accept' | 'decline',
+  ) {
+    setApprovalErrorMessage(null);
+    setRespondingApprovalIds((current) =>
+      current.includes(requestId) ? current : [...current, requestId],
+    );
+
+    try {
+      await respondToLiveApproval(threadId, requestId, decision);
+      await refreshCurrentDetail();
+    } catch (error) {
+      setApprovalErrorMessage(
+        error instanceof Error ? error.message : 'Failed to answer approval request.',
+      );
+    } finally {
+      setRespondingApprovalIds((current) => current.filter((id) => id !== requestId));
+    }
+  }
+
   return (
     <>
       <div className="app-shell">
@@ -461,6 +490,9 @@ export function App() {
               preferredSessionId={preferredSessionId}
               liveSessionUpdates={liveSessionUpdates}
               onSelectSession={(sessionId) => setPreferredSessionId(sessionId)}
+              onRespondApproval={handleApprovalResponse}
+              respondingApprovalIds={respondingApprovalIds}
+              approvalErrorMessage={approvalErrorMessage}
             />
           ) : (
             <div className="empty-panel">

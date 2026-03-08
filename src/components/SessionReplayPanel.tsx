@@ -1,6 +1,6 @@
 import { useMemo, type RefObject } from 'react';
 
-import type { ChangeUnitDetail, CodexSessionView } from '../../shared/api.ts';
+import type { ChangeUnitDetail, CodexLiveApproval, CodexSessionView } from '../../shared/api.ts';
 import { formatLongTimestamp } from '../lib/format.ts';
 import { CodexThreadViewer } from './CodexThreadViewer.tsx';
 
@@ -18,6 +18,13 @@ type SessionReplayPanelProps = {
   liveSessionUpdates: LiveSessionUpdates;
   focusRef?: RefObject<HTMLElement | null>;
   onSelectSession: (sessionId: string) => void;
+  onRespondApproval: (
+    threadId: string,
+    requestId: number,
+    decision: 'accept' | 'decline',
+  ) => Promise<void>;
+  respondingApprovalIds: number[];
+  approvalErrorMessage: string | null;
 };
 
 function roleWeight(role: string): number {
@@ -50,12 +57,31 @@ function getSessionMeta(session: CodexSessionView): string {
   return session.status;
 }
 
+function getApprovalTitle(approval: CodexLiveApproval) {
+  switch (approval.approval_kind) {
+    case 'commandExecution':
+      return 'Command approval';
+    case 'fileChange':
+      return 'File change approval';
+    default:
+      return 'Approval request';
+  }
+}
+
+function getApprovalStatusCopy(approval: CodexLiveApproval) {
+  if (approval.status === 'pending') return 'Pending';
+  return approval.decision === 'accept' ? 'Accepted' : 'Declined';
+}
+
 export function SessionReplayPanel({
   detail,
   preferredSessionId,
   liveSessionUpdates,
   focusRef,
   onSelectSession,
+  onRespondApproval,
+  respondingApprovalIds,
+  approvalErrorMessage,
 }: SessionReplayPanelProps) {
   const sessions = useMemo(
     () => [...detail.session_views].sort((a, b) => roleWeight(a.role) - roleWeight(b.role)),
@@ -213,6 +239,137 @@ export function SessionReplayPanel({
                   <p className="execution-note execution-error">{activeSession.load_error}</p>
                 ) : null}
               </section>
+
+              {activeSession.source_kind === 'live' && activeSession.approvals.length > 0 ? (
+                <section className="replay-log-shell replay-approvals-shell">
+                  <div className="section-heading">
+                    <div>
+                      <p className="section-label">Approvals</p>
+                      <h4>Inline live-session approvals</h4>
+                    </div>
+                  </div>
+
+                  {approvalErrorMessage ? (
+                    <p className="execution-note execution-error">{approvalErrorMessage}</p>
+                  ) : null}
+
+                  <div className="approval-list">
+                    {activeSession.approvals.map((approval) => {
+                      const isResponding = respondingApprovalIds.includes(approval.request_id);
+
+                      return (
+                        <article
+                          key={approval.request_id}
+                          className={`approval-card approval-card-${approval.status}`}
+                          data-approval-kind={approval.approval_kind}
+                          data-approval-status={approval.status}
+                        >
+                          <header className="approval-card-header">
+                            <div>
+                              <p className="section-label">{getApprovalTitle(approval)}</p>
+                              <h5>{getApprovalStatusCopy(approval)}</h5>
+                            </div>
+                            <code>request {approval.request_id}</code>
+                          </header>
+
+                          {approval.reason ? <p className="thread-item-text">{approval.reason}</p> : null}
+
+                          {approval.command ? (
+                            <pre className="thread-code-block">
+                              <code>{approval.command}</code>
+                            </pre>
+                          ) : null}
+
+                          {approval.changes && approval.changes.length > 0 ? (
+                            <div className="thread-file-change-list">
+                              {approval.changes.map((change, index) => (
+                                <section
+                                  key={`${change.path ?? change.kind ?? 'change'}-${index}`}
+                                  className="thread-file-change-entry"
+                                >
+                                  <header className="thread-file-change-header">
+                                    <strong>{change.path ?? 'Pending change'}</strong>
+                                    {change.kind ? <span>{change.kind}</span> : null}
+                                  </header>
+                                  {change.diff ? (
+                                    <pre className="thread-code-block thread-patch-block">
+                                      <code>{change.diff}</code>
+                                    </pre>
+                                  ) : null}
+                                </section>
+                              ))}
+                            </div>
+                          ) : null}
+
+                          <dl className="thread-item-metadata">
+                            <div>
+                              <dt>Thread</dt>
+                              <dd>
+                                <code>{approval.thread_id}</code>
+                              </dd>
+                            </div>
+                            {approval.turn_id ? (
+                              <div>
+                                <dt>Turn</dt>
+                                <dd>
+                                  <code>{approval.turn_id}</code>
+                                </dd>
+                              </div>
+                            ) : null}
+                            {approval.item_id ? (
+                              <div>
+                                <dt>Item</dt>
+                                <dd>
+                                  <code>{approval.item_id}</code>
+                                </dd>
+                              </div>
+                            ) : null}
+                            {approval.cwd ? (
+                              <div>
+                                <dt>cwd</dt>
+                                <dd>
+                                  <code>{approval.cwd}</code>
+                                </dd>
+                              </div>
+                            ) : null}
+                          </dl>
+
+                          {approval.status === 'pending' ? (
+                            <div className="approval-actions">
+                              <button
+                                className="execute-next-button"
+                                disabled={isResponding}
+                                onClick={() =>
+                                  void onRespondApproval(approval.thread_id, approval.request_id, 'accept')
+                                }
+                                type="button"
+                              >
+                                {isResponding ? 'Responding…' : 'Accept'}
+                              </button>
+                              <button
+                                className="replay-mode-tab"
+                                disabled={isResponding}
+                                onClick={() =>
+                                  void onRespondApproval(approval.thread_id, approval.request_id, 'decline')
+                                }
+                                type="button"
+                              >
+                                Decline
+                              </button>
+                            </div>
+                          ) : (
+                            <p className="thread-item-text">
+                              {approval.decision === 'accept'
+                                ? 'Codex was allowed to continue.'
+                                : 'Codex was declined for this action.'}
+                            </p>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
 
               {activeSession.milestones.length > 0 ? (
                 <section className="replay-log-shell replay-milestones-shell">

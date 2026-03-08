@@ -738,6 +738,7 @@ export async function buildLinkedSessionViews(args: {
           launched_from: null,
           thread: null,
           load_error: 'This session does not include a Codex-native rollout capture.',
+          approvals: [],
         };
       }
 
@@ -755,6 +756,7 @@ export async function buildLinkedSessionViews(args: {
           launched_from: null,
           thread,
           load_error: null,
+          approvals: [],
         };
       } catch (error) {
         return {
@@ -769,6 +771,7 @@ export async function buildLinkedSessionViews(args: {
           thread: null,
           load_error:
             error instanceof Error ? error.message : 'Failed to load captured Codex thread.',
+          approvals: [],
         };
       }
     }),
@@ -777,10 +780,11 @@ export async function buildLinkedSessionViews(args: {
 
 export async function buildLiveSessionView(args: {
   execution: ChangeUnitExecutionLaunched;
+  approvals: CodexSessionView['approvals'];
   ensureAppServerStarted: () => Promise<void>;
   appServerRequest: (method: string, params: unknown) => Promise<unknown>;
 }): Promise<CodexSessionView> {
-  const { execution, ensureAppServerStarted, appServerRequest } = args;
+  const { execution, approvals, ensureAppServerStarted, appServerRequest } = args;
 
   await ensureAppServerStarted();
 
@@ -806,6 +810,7 @@ export async function buildLiveSessionView(args: {
       },
       thread: normalizeCodexThread(readResult),
       load_error: null,
+      approvals,
     };
   } catch (error) {
     return {
@@ -824,6 +829,7 @@ export async function buildLiveSessionView(args: {
       },
       thread: null,
       load_error: error instanceof Error ? error.message : 'Failed to load launched thread.',
+      approvals,
     };
   }
 }
