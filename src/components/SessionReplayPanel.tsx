@@ -263,6 +263,7 @@ export function SessionReplayPanel({
                           key={approval.request_id}
                           className={`approval-card approval-card-${approval.status}`}
                           data-approval-kind={approval.approval_kind}
+                          data-approval-request-id={String(approval.request_id)}
                           data-approval-status={approval.status}
                         >
                           <header className="approval-card-header">

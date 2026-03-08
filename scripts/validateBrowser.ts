@@ -242,37 +242,59 @@ async function clearApproval(requestId: number, threadId: string) {
 async function assertApprovalCard(
   kind: 'commandExecution' | 'fileChange',
   status: 'pending' | 'answered' | 'cleared',
+  requestId: number,
 ) {
-  await browserEval(
-    [
-      `const kind = ${JSON.stringify(kind)};`,
-      `const status = ${JSON.stringify(status)};`,
-      "const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"${status}\"]`);",
-      "if (!card) throw new Error(`Missing approval card for ${kind} with status ${status}.`);",
-      "if (!card.textContent?.includes('Thread')) throw new Error('Approval card should show thread details.');",
-      "if (!card.textContent?.includes('Turn')) throw new Error('Approval card should show turn details.');",
-      "if (!card.textContent?.includes('Item')) throw new Error('Approval card should show item details.');",
-      "if (kind === 'commandExecution' && !card.textContent?.includes('npm test -- --runInBand')) {",
-      "  throw new Error('Command approval should show the proposed command.');",
-      '}',
-      "if (kind === 'fileChange' && !card.textContent?.includes('src/validation.js')) {",
-      "  throw new Error('File change approval should show the proposed file path.');",
-      '}',
-      "if (status === 'cleared' && card.textContent?.includes('Declined')) {",
-      "  throw new Error('Cleared approval should not render as declined.');",
-      '}',
-    ].join(' '),
-  );
-}
-
-async function answerApproval(kind: 'commandExecution' | 'fileChange', decision: 'accept' | 'decline') {
   await browserEval(
     [
       '(async () => {',
       `  const kind = ${JSON.stringify(kind)};`,
+      `  const status = ${JSON.stringify(status)};`,
+      `  const requestId = ${JSON.stringify(String(requestId))};`,
+      '  const deadline = Date.now() + 10000;',
+      '  let card = null;',
+      '  while (Date.now() < deadline) {',
+      "    card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"${status}\"][data-approval-request-id=\"${requestId}\"]`);",
+      '    if (card) break;',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 200));',
+      '  }',
+      "  if (!card) throw new Error(`Missing approval card for ${kind} with status ${status} and request ${requestId}.`);",
+      "  if (!card.textContent?.includes('Thread')) throw new Error('Approval card should show thread details.');",
+      "  if (!card.textContent?.includes('Turn')) throw new Error('Approval card should show turn details.');",
+      "  if (!card.textContent?.includes('Item')) throw new Error('Approval card should show item details.');",
+      "  if (kind === 'commandExecution' && !card.textContent?.includes('npm test -- --runInBand')) {",
+      "    throw new Error('Command approval should show the proposed command.');",
+      '  }',
+      "  if (kind === 'fileChange' && !card.textContent?.includes('src/validation.js')) {",
+      "    throw new Error('File change approval should show the proposed file path.');",
+      '  }',
+      "  if (status === 'cleared' && card.textContent?.includes('Declined')) {",
+      "    throw new Error('Cleared approval should not render as declined.');",
+      '  }',
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function answerApproval(
+  kind: 'commandExecution' | 'fileChange',
+  requestId: number,
+  decision: 'accept' | 'decline',
+) {
+  await browserEval(
+    [
+      '(async () => {',
+      `  const kind = ${JSON.stringify(kind)};`,
+      `  const requestId = ${JSON.stringify(String(requestId))};`,
       `  const decision = ${JSON.stringify(decision)};`,
-      "  const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"pending\"]`);",
-      "  if (!card) throw new Error(`Missing pending approval for ${kind}.`);",
+      "  const selector = `[data-approval-kind=\"${kind}\"][data-approval-status=\"pending\"][data-approval-request-id=\"${requestId}\"]`;",
+      '  const deadline = Date.now() + 10000;',
+      '  let card = null;',
+      '  while (Date.now() < deadline) {',
+      '    card = document.querySelector(selector);',
+      '    if (card) break;',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 200));',
+      '  }',
+      "  if (!card) throw new Error(`Missing pending approval for ${kind} request ${requestId}.`);",
       "  const button = [...card.querySelectorAll('button')].find((node) => node.textContent?.trim() === (decision === 'accept' ? 'Accept' : 'Decline'));",
       "  if (!(button instanceof HTMLElement)) throw new Error(`Missing ${decision} button for ${kind}.`);",
       "  button.click();",
@@ -285,14 +307,15 @@ async function answerApproval(kind: 'commandExecution' | 'fileChange', decision:
     [
       '(async () => {',
       `  const kind = ${JSON.stringify(kind)};`,
+      `  const requestId = ${JSON.stringify(String(requestId))};`,
       `  const expected = ${JSON.stringify(decision === 'accept' ? 'Accepted' : 'Declined')};`,
-      '  const deadline = Date.now() + 8000;',
+      '  const deadline = Date.now() + 10000;',
       '  while (Date.now() < deadline) {',
-      "    const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"answered\"]`);",
+      "    const card = document.querySelector(`[data-approval-kind=\"${kind}\"][data-approval-status=\"answered\"][data-approval-request-id=\"${requestId}\"]`);",
       "    if (card && card.textContent?.includes(expected)) return;",
       '    await new Promise((resolve) => window.setTimeout(resolve, 200));',
       '  }',
-      "  throw new Error(`Approval ${kind} did not transition to answered state.`);",
+      "  throw new Error(`Approval ${kind} request ${requestId} did not transition to answered state.`);",
       '})()',
     ].join(' '),
   );
@@ -443,18 +466,18 @@ try {
     ].join(' '),
   );
   await assertExecutionLaunched();
-  await injectApproval('commandExecution');
-  await assertApprovalCard('commandExecution', 'pending');
-  await answerApproval('commandExecution', 'accept');
-  await assertApprovalCard('commandExecution', 'answered');
+  const commandApproval = await injectApproval('commandExecution');
+  await assertApprovalCard('commandExecution', 'pending', commandApproval.request_id);
+  await answerApproval('commandExecution', commandApproval.request_id, 'accept');
+  await assertApprovalCard('commandExecution', 'answered', commandApproval.request_id);
   const clearedApproval = await injectApproval('fileChange');
-  await assertApprovalCard('fileChange', 'pending');
+  await assertApprovalCard('fileChange', 'pending', clearedApproval.request_id);
   await clearApproval(clearedApproval.request_id, clearedApproval.thread_id);
-  await assertApprovalCard('fileChange', 'cleared');
-  await injectApproval('fileChange');
-  await assertApprovalCard('fileChange', 'pending');
-  await answerApproval('fileChange', 'decline');
-  await assertApprovalCard('fileChange', 'answered');
+  await assertApprovalCard('fileChange', 'cleared', clearedApproval.request_id);
+  const declinedApproval = await injectApproval('fileChange');
+  await assertApprovalCard('fileChange', 'pending', declinedApproval.request_id);
+  await answerApproval('fileChange', declinedApproval.request_id, 'decline');
+  await assertApprovalCard('fileChange', 'answered', declinedApproval.request_id);
 
   await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
