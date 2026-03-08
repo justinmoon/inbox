@@ -12,7 +12,7 @@ The product is intentionally narrow:
 
 - one inbox rail
 - one reading-first review surface
-- one replay surface
+- one Codex-native replay surface
 - one structured tutorial
 - one persisted `Execute Next Prompt` state model
 - one real launched-session surface tied to the reviewed checkpoint
@@ -72,14 +72,15 @@ The bundle now uses:
 
 - one canonical `change_unit`
 - structured tutorial data with `executive_summary` and tutorial `steps`
-- real linked sessions and review verdicts
+- real linked sessions, rollout captures, and review verdicts
 - a narrow executable `next_action`
 
 Runtime state stays outside the bundle:
 
 - execute-next persists `idle` / `launching` / `launched` / `failed`
 - the reviewed checkpoint packet stays immutable
-- launched thread metadata and live transcript are attached at read time
+- linked checkpoint sessions are reconstructed from committed rollout history
+- launched thread metadata and live transcript are attached at read time from Codex app-server
 
 The generated JSON schema lives in
 [`schema/change-unit.bundle.schema.json`](./schema/change-unit.bundle.schema.json).
@@ -103,7 +104,7 @@ paths. The current product does not use the old generated change-unit or SQLite 
 3. opens `/`
 4. opens a stale demo deep link and verifies recovery to the canonical checkpoint
 5. executes the canonical next action and verifies launched state persists
-6. verifies the launched thread becomes visible in the replay surface
+6. verifies linked and live sessions both render through the Codex-native thread viewer
 7. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
 8. verifies failed execute-next state renders a real retryable error
 

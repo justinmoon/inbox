@@ -1,8 +1,9 @@
 import type { ChangeUnitListItem } from '../shared/api.ts';
 import type { ChangeUnitBundle } from '../shared/changeUnitBundle.ts';
+import type { LoadedBundle } from './importBundles.ts';
 
-export function listChangeUnits(bundles: ChangeUnitBundle[]): ChangeUnitListItem[] {
-  return bundles.map((bundle) => ({
+export function listChangeUnits(bundles: LoadedBundle[]): ChangeUnitListItem[] {
+  return bundles.map(({ bundle }) => ({
     id: bundle.change_unit.id,
     title: bundle.change_unit.title,
     status: bundle.change_unit.status,
@@ -18,8 +19,8 @@ export function listChangeUnits(bundles: ChangeUnitBundle[]): ChangeUnitListItem
 }
 
 export function getChangeUnitDetail(
-  bundles: ChangeUnitBundle[],
+  bundles: LoadedBundle[],
   id: string,
-): ChangeUnitBundle | null {
-  return bundles.find((bundle) => bundle.change_unit.id === id) ?? null;
+): LoadedBundle | null {
+  return bundles.find((bundle) => bundle.bundle.change_unit.id === id) ?? null;
 }

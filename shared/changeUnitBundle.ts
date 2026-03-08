@@ -12,6 +12,7 @@ export const changeUnitStatuses = [
 export const reviewVerdicts = ['approve', 'needs_revision', 'comment', 'blocked'] as const;
 export const transcriptItemKinds = ['user', 'assistant', 'tool', 'system', 'note'] as const;
 export const nextActionKinds = ['codex_fork_path', 'codex_resume_thread'] as const;
+export const sessionCaptureKinds = ['rollout_path'] as const;
 
 const timestampSchema = z.string().min(1);
 
@@ -43,6 +44,13 @@ const milestoneSchema = z.object({
   description: z.string().min(1).optional(),
 });
 
+const sessionCaptureSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('rollout_path'),
+    path: z.string().min(1),
+  }),
+]);
+
 const agentSessionSchema = z.object({
   id: z.string().min(1),
   change_unit_id: z.string().min(1),
@@ -51,10 +59,13 @@ const agentSessionSchema = z.object({
   status: z.string().min(1),
   summary: z.string().min(1).optional(),
   milestones: z.array(milestoneSchema).default([]),
-  transcript: z.object({
-    summary: z.string().min(1).optional(),
-    turns: z.array(transcriptTurnSchema).min(1),
-  }),
+  thread_capture: sessionCaptureSchema.optional(),
+  transcript: z
+    .object({
+      summary: z.string().min(1).optional(),
+      turns: z.array(transcriptTurnSchema).min(1),
+    })
+    .optional(),
   created_at: timestampSchema,
   updated_at: timestampSchema,
 });

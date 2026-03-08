@@ -312,6 +312,28 @@
               "additionalProperties": false
             }
           },
+          "thread_capture": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "rollout_path"
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
           "transcript": {
             "type": "object",
             "properties": {
@@ -434,7 +456,6 @@
           "runtime",
           "status",
           "milestones",
-          "transcript",
           "created_at",
           "updated_at"
         ],

@@ -128,6 +128,10 @@
           "description": "Session opened from the captured workflow."
         }
       ],
+      "thread_capture": {
+        "kind": "rollout_path",
+        "path": "rollouts/planner.jsonl"
+      },
       "transcript": {
         "summary": "Planner proposes the narrow validation-summary change and hands the implementer an explicit prompt.",
         "turns": [
@@ -270,6 +274,10 @@
           "description": "Follow-up turn in the same workflow session."
         }
       ],
+      "thread_capture": {
+        "kind": "rollout_path",
+        "path": "rollouts/implementer.jsonl"
+      },
       "transcript": {
         "summary": "Implementer makes the formatter and test updates, runs `npm test`, then summarizes the packet.",
         "turns": [
@@ -484,6 +492,10 @@
           "description": "Session opened from the captured workflow."
         }
       ],
+      "thread_capture": {
+        "kind": "rollout_path",
+        "path": "rollouts/reviewer-a.jsonl"
+      },
       "transcript": {
         "summary": "Reviewer A checks correctness and flags the sparse-array regression plus missing regression coverage.",
         "turns": [
@@ -823,6 +835,10 @@
           "description": "Session opened from the captured workflow."
         }
       ],
+      "thread_capture": {
+        "kind": "rollout_path",
+        "path": "rollouts/reviewer-b.jsonl"
+      },
       "transcript": {
         "summary": "Reviewer B checks maintainability and flags non-deterministic summary ordering plus the stale test name.",
         "turns": [

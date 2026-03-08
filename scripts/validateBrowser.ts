@@ -135,6 +135,8 @@ async function assertSurfaceLoaded(expectedTitle: string, expectedStepTitles: st
       '}',
       "if (!document.querySelector('.tutorial-step-card')) throw new Error('Tutorial step card is missing.');",
       "if (!document.querySelector('.replay-panel')) throw new Error('Replay panel is missing.');",
+      "if (document.querySelectorAll('.session-tab').length < 1) throw new Error('Expected at least one Codex session tab.');",
+      "if (!document.querySelector('.codex-thread-viewer')) throw new Error('Codex thread viewer is missing.');",
       "if (!document.body.textContent?.includes('Diff')) throw new Error('Diff section is missing.');",
     ].join(' '),
   );
@@ -164,15 +166,26 @@ async function assertExecutionLaunched() {
     [
       "const actionState = document.querySelector('[data-execution-state=\"launched\"]');",
       "if (!actionState) throw new Error('Expected launched execution state.');",
-      "if (!document.querySelector('[data-open-live-session=\"true\"]')) throw new Error('Open Live Session CTA is missing.');",
+      "const openButton = document.querySelector('[data-open-live-session=\"true\"]');",
+      "if (!(openButton instanceof HTMLElement)) throw new Error('Open Live Session CTA is missing.');",
       "const threadCode = document.querySelector('.execution-metadata code')?.textContent?.trim();",
       "if (!threadCode) throw new Error('Expected launched thread id in the action area.');",
-      "const liveCard = document.querySelector('[data-live-session-state=\"launched\"]');",
-      "if (!liveCard) throw new Error('Expected launched live-session card in the replay panel.');",
+      "openButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
+    ].join(' '),
+  );
+
+  await runBrowser(['wait', '--text', 'Live Session']);
+  await browserEval(
+    [
+      "const liveTab = document.querySelector('[data-session-source=\"live\"]');",
+      "if (!(liveTab instanceof HTMLElement)) throw new Error('Expected a live session tab after launch.');",
+      "const activeView = document.querySelector('[data-session-view=\"live\"]');",
+      "if (!activeView) throw new Error('Expected the live session view to be active.');",
       "const liveMetadata = [...document.querySelectorAll('.live-session-metadata code')].map((node) => node.textContent?.trim() ?? '');",
-      "if (liveMetadata.length < 2 || !liveMetadata[0] || !liveMetadata[1]) {",
-      "  throw new Error('Expected launched thread and turn ids in the live session panel.');",
+      "if (liveMetadata.length < 1 || !liveMetadata[0]) {",
+      "  throw new Error('Expected launched turn metadata in the live session panel.');",
       '}',
+      "if (!document.querySelector('.codex-thread-viewer')) throw new Error('Expected the live session to render through the Codex thread viewer.');",
     ].join(' '),
   );
 }
@@ -191,6 +204,26 @@ async function assertExecutionFailed() {
   );
 }
 
+async function assertCodexReplayKinds(role: string, expectedKinds: string[]) {
+  await browserEval(
+    [
+      '(async () => {',
+      `  const role = ${JSON.stringify(role)};`,
+      `  const expectedKinds = ${JSON.stringify(expectedKinds)};`,
+      "  const tab = document.querySelector(`[data-session-role=\"${role}\"]`);",
+      "  if (!(tab instanceof HTMLElement)) throw new Error(`Missing session tab for ${role}.`);",
+      "  tab.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      "  if (!document.querySelector('.codex-thread-viewer')) throw new Error('Missing Codex thread viewer after selecting session.');",
+      "  const seenKinds = new Set([...document.querySelectorAll('[data-item-type]')].map((node) => node.getAttribute('data-item-type')));",
+      '  for (const kind of expectedKinds) {',
+      "    if (!seenKinds.has(kind)) throw new Error(`Expected replay surface to render ${kind} for ${role}.`);",
+      '  }',
+      '})()',
+    ].join(' '),
+  );
+}
+
 await fs.mkdir(importedRoot, { recursive: true });
 await fs.mkdir(runtimeRoot, { recursive: true });
 await runCommand('npx', ['agent-browser', 'install']);
@@ -201,6 +234,7 @@ const canonicalStepTitles = canonicalBundle.change_unit.tutorial.steps.map(
 );
 
 const dynamicFixture = structuredClone(canonicalBundle) as BundleLike;
+const canonicalBundleDir = path.dirname(canonicalBundlePath);
 
 dynamicFixture.change_unit.id = 'cu_dynamic_tutorial_fixture';
 dynamicFixture.change_unit.title = 'Exercise dynamic tutorial navigation';
@@ -225,6 +259,16 @@ dynamicFixture.change_unit.next_action = {
   prompt: 'Retry the dynamic tutorial fixture.',
   label: 'Execute Next Prompt',
 };
+dynamicFixture.agent_sessions = dynamicFixture.agent_sessions.map((session: BundleLike) => ({
+  ...session,
+  thread_capture:
+    session.thread_capture?.kind === 'rollout_path'
+      ? {
+          ...session.thread_capture,
+          path: path.join(canonicalBundleDir, session.thread_capture.path),
+        }
+      : session.thread_capture,
+}));
 
 const dynamicFixturePath = path.join(validationRoot, 'dynamic-tutorial-fixture.json');
 await fs.writeFile(dynamicFixturePath, JSON.stringify(dynamicFixture, null, 2), 'utf8');
@@ -249,6 +293,7 @@ try {
 
   await runBrowser(['open', baseUrl]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertCodexReplayKinds('implementer', ['reasoning', 'commandExecution', 'fileChange']);
   const rootSearch = readEvalString(await browserEval('window.location.search;', true));
   if (rootSearch !== '') {
     throw new Error(`Opening / should not inject a stale change param. Saw ${rootSearch}.`);
@@ -256,6 +301,7 @@ try {
 
   await runBrowser(['open', `${baseUrl}/?change=cu_session_recovery`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertCodexReplayKinds('implementer', ['reasoning', 'commandExecution', 'fileChange']);
   const recoveredSearch = readEvalString(await browserEval('window.location.search;', true));
   assertIncludes(
     recoveredSearch,
@@ -268,6 +314,7 @@ try {
 
   await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertCodexReplayKinds('implementer', ['reasoning', 'commandExecution', 'fileChange']);
   const canonicalSearch = readEvalString(await browserEval('window.location.search;', true));
   assertIncludes(
     canonicalSearch,
@@ -289,6 +336,18 @@ try {
   await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
   await assertExecutionLaunched();
+  await browserEval(
+    [
+      '(async () => {',
+      "  const linkedTab = document.querySelector('[data-session-role=\"planner\"]');",
+      "  if (!(linkedTab instanceof HTMLElement)) throw new Error('Expected planner session tab.');",
+      "  linkedTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      "  const linkedView = document.querySelector('[data-session-view=\"linked\"]');",
+      "  if (!linkedView) throw new Error('Expected to return to a linked checkpoint session view.');",
+      '})()',
+    ].join(' '),
+  );
 
   await postJson('/api/import-bundle', { path: dynamicFixturePath });
   await runBrowser(['open', `${baseUrl}/?change=cu_dynamic_tutorial_fixture`]);

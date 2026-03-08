@@ -58,7 +58,7 @@ export function App() {
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [replayMode, setReplayMode] = useState<'linked' | 'live'>('linked');
+  const [preferredSessionId, setPreferredSessionId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
   const itemButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -238,15 +238,15 @@ export function App() {
 
   useEffect(() => {
     if (!currentDetail) {
-      setReplayMode('linked');
+      setPreferredSessionId(null);
       return;
     }
 
-    setReplayMode(currentDetail.live_session ? 'live' : 'linked');
-  }, [currentDetail?.change_unit.id, currentDetail?.live_session?.thread_id]);
+    setPreferredSessionId(currentDetail.live_session_id ?? currentDetail.session_views[0]?.id ?? null);
+  }, [currentDetail?.change_unit.id, currentDetail?.live_session_id, currentDetail?.session_views]);
 
   function openLiveSession() {
-    setReplayMode('live');
+    setPreferredSessionId(currentDetail?.live_session_id ?? null);
     replayPanelRef.current?.focus();
   }
 
@@ -319,8 +319,7 @@ export function App() {
             <SessionReplayPanel
               detail={currentDetail}
               focusRef={replayPanelRef}
-              mode={replayMode}
-              onModeChange={setReplayMode}
+              preferredSessionId={preferredSessionId}
             />
           ) : (
             <div className="empty-panel">

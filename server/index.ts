@@ -6,15 +6,12 @@ import express from 'express';
 import type {
   ChangeUnitDetail,
   ChangeUnitExecutionLaunched,
-  ChangeUnitExecutionState,
   ExecuteNextActionResult,
-  LiveSessionDetail,
-  ReplayTurn,
-  ReplayTurnItem,
 } from '../shared/api.ts';
 import { getChangeUnitDetail, listChangeUnits } from './changeUnits.ts';
 import { AppServerProcess } from './appServerProcess.ts';
 import { readConfig } from './config.ts';
+import { buildLinkedSessionViews, buildLiveSessionView } from './codexSessions.ts';
 import { ExecutionStateStore } from './executionStateStore.ts';
 import {
   clearImportedBundles,
@@ -128,196 +125,36 @@ function extractTurnId(result: unknown): string {
   return result.turn.id;
 }
 
-function readString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value : null;
-}
-
-function readNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function toIsoTimestamp(value: unknown): string | null {
-  if (typeof value === 'string') {
-    const timestamp = new Date(value);
-    return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
-  }
-
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return new Date(value * 1000).toISOString();
-  }
-
-  return null;
-}
-
-function extractThreadMetadata(result: unknown) {
-  if (!isObject(result) || !isObject(result.thread)) {
-    throw new Error('Codex app-server returned an invalid thread response.');
-  }
-
-  return {
-    id: extractThreadId(result),
-    preview: readString(result.thread.preview) ?? '',
-    status: readString(result.thread.status) ?? 'active',
-    updated_at: toIsoTimestamp(result.thread.updatedAt),
-    turns: Array.isArray(result.thread.turns) ? result.thread.turns : [],
-  };
-}
-
-function extractUserMessageText(content: unknown): string {
-  if (!Array.isArray(content)) {
-    return '';
-  }
-
-  return content
-    .filter((entry) => isObject(entry) && entry.type === 'text' && typeof entry.text === 'string')
-    .map((entry) => String(entry.text))
-    .join('\n')
-    .trim();
-}
-
-function normalizeThreadItem(item: unknown): ReplayTurnItem | null {
-  if (!isObject(item) || typeof item.id !== 'string' || typeof item.type !== 'string') {
-    return null;
-  }
-
-  const timestamp = toIsoTimestamp(item.timestamp) ?? undefined;
-
-  switch (item.type) {
-    case 'userMessage': {
-      const text = extractUserMessageText(item.content);
-      return {
-        id: item.id,
-        type: 'user',
-        title: 'Prompt',
-        text: text || undefined,
-        timestamp,
-      };
-    }
-    case 'agentMessage':
-      return {
-        id: item.id,
-        type: 'assistant',
-        title: 'Codex',
-        text: readString(item.text) ?? undefined,
-        timestamp,
-      };
-    case 'commandExecution': {
-      const command = Array.isArray(item.command)
-        ? item.command.map((part) => String(part)).join(' ')
-        : readString(item.command);
-      const output =
-        readString(item.output) ??
-        readString(item.combinedOutput) ??
-        readString(item.stderr) ??
-        readString(item.stdout);
-      return {
-        id: item.id,
-        type: 'tool',
-        title: readString(item.title) ?? 'Command',
-        command: command ?? undefined,
-        output: output ?? undefined,
-        status: readString(item.status) ?? undefined,
-        exit_code: readNumber(item.exitCode) ?? undefined,
-        duration_ms: readNumber(item.durationMs) ?? undefined,
-        timestamp,
-      };
-    }
-    default: {
-      const text =
-        readString(item.text) ??
-        readString(item.message) ??
-        readString(item.summary) ??
-        JSON.stringify(item, null, 2);
-      return {
-        id: item.id,
-        type: item.type === 'systemMessage' ? 'system' : 'note',
-        title: readString(item.title) ?? item.type,
-        text,
-        status: readString(item.status) ?? undefined,
-        timestamp,
-      };
-    }
-  }
-}
-
-function normalizeThreadTurns(turns: unknown[]): ReplayTurn[] {
-  return turns.flatMap((turn) => {
-    if (!isObject(turn) || typeof turn.id !== 'string') {
-      return [];
-    }
-
-    const items = Array.isArray(turn.items)
-      ? turn.items
-          .map((item) => normalizeThreadItem(item))
-          .filter((item): item is ReplayTurnItem => item !== null)
-      : [];
-
-    return [
-      {
-        id: turn.id,
-        label: readString(turn.label) ?? 'Live turn',
-        timestamp: toIsoTimestamp(turn.timestamp) ?? new Date().toISOString(),
-        status: readString(turn.status) ?? undefined,
-        items,
-      },
-    ];
-  });
-}
-
-async function readLiveSession(execution: ChangeUnitExecutionLaunched) {
-  try {
-    await ensureAppServerStarted();
-    const result = await appServer.request('thread/read', {
-      threadId: execution.thread_id,
-      includeTurns: true,
-    });
-    const thread = extractThreadMetadata(result);
-
-    const liveSession: LiveSessionDetail = {
-      thread_id: execution.thread_id,
-      turn_id: execution.turn_id,
-      thread_source: execution.thread_source,
-      started_at: execution.started_at,
-      action_label: execution.action_label,
-      preview: thread.preview || 'Live session',
-      status: thread.status,
-      updated_at: thread.updated_at,
-      transcript: {
-        turns: normalizeThreadTurns(thread.turns),
-      },
-    };
-
-    return { liveSession, error: null as string | null };
-  } catch (error) {
-    return {
-      liveSession: null,
-      error: error instanceof Error ? error.message : 'Failed to read launched thread.',
-    };
-  }
-}
-
 async function buildDetail(detailId: string): Promise<ChangeUnitDetail | null> {
   const bundles = await readBundles();
-  const detail = getChangeUnitDetail(bundles, detailId);
-  if (!detail) {
+  const bundleRecord = getChangeUnitDetail(bundles, detailId);
+  if (!bundleRecord) {
     return null;
   }
 
   const executionState = await executionStateStore.read(detailId);
-  let liveSession: LiveSessionDetail | null = null;
-  let liveSessionError: string | null = null;
+  const sessionViews = await buildLinkedSessionViews({
+    bundleRecord,
+    ensureAppServerStarted,
+    appServerRequest: (method, params) => appServer.request(method, params),
+  });
 
+  let liveSessionId: string | null = null;
   if (executionState.status === 'launched') {
-    const liveState = await readLiveSession(executionState);
-    liveSession = liveState.liveSession;
-    liveSessionError = liveState.error;
+    const liveSessionView = await buildLiveSessionView({
+      execution: executionState,
+      ensureAppServerStarted,
+      appServerRequest: (method, params) => appServer.request(method, params),
+    });
+    sessionViews.push(liveSessionView);
+    liveSessionId = liveSessionView.id;
   }
 
   return {
-    ...detail,
+    ...bundleRecord.bundle,
     execution_state: executionState,
-    live_session: liveSession,
-    live_session_error: liveSessionError,
+    session_views: sessionViews,
+    live_session_id: liveSessionId,
   };
 }
 
@@ -359,12 +196,14 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
       const forkResult = await appServer.request('thread/fork', {
         threadId: '',
         path: resolveActionPath(action.path),
+        persistExtendedHistory: true,
       });
       threadId = extractThreadId(forkResult);
       threadSource = 'forked';
     } else {
       const resumeResult = await appServer.request('thread/resume', {
         threadId: action.thread_id,
+        persistExtendedHistory: true,
       });
       threadId = extractThreadId(resumeResult);
     }
