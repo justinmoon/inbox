@@ -137,6 +137,7 @@ async function assertSurfaceLoaded(expectedTitle: string, expectedStepTitles: st
       "if (!document.querySelector('.replay-panel')) throw new Error('Replay panel is missing.');",
       "if (document.querySelectorAll('.session-tab').length < 1) throw new Error('Expected at least one Codex session tab.');",
       "if (!document.querySelector('.codex-thread-viewer')) throw new Error('Codex thread viewer is missing.');",
+      "if (!document.querySelector('[data-thread-viewer-model=\"codex-native\"]')) throw new Error('Expected Codex-native thread viewer model marker.');",
       "if (!document.body.textContent?.includes('Diff')) throw new Error('Diff section is missing.');",
     ].join(' '),
   );
@@ -177,6 +178,7 @@ async function assertExecutionLaunched() {
   await runBrowser(['wait', '--text', 'Live Session']);
   await browserEval(
     [
+      '(async () => {',
       "const liveTab = document.querySelector('[data-session-source=\"live\"]');",
       "if (!(liveTab instanceof HTMLElement)) throw new Error('Expected a live session tab after launch.');",
       "const activeView = document.querySelector('[data-session-view=\"live\"]');",
@@ -185,7 +187,17 @@ async function assertExecutionLaunched() {
       "if (liveMetadata.length < 1 || !liveMetadata[0]) {",
       "  throw new Error('Expected launched turn metadata in the live session panel.');",
       '}',
-      "if (!document.querySelector('.codex-thread-viewer')) throw new Error('Expected the live session to render through the Codex thread viewer.');",
+      "if (!document.querySelector('[data-thread-viewer-model=\"codex-native\"]')) throw new Error('Expected the live session to render through the Codex-native thread viewer.');",
+      '  const deadline = Date.now() + 10000;',
+      '  while (Date.now() < deadline) {',
+      "    const liveUpdate = document.querySelector('[data-live-update-mode]');",
+      "    const count = Number(liveUpdate?.getAttribute('data-live-update-count') ?? '0');",
+      "    const lastMethod = document.querySelector('.live-session-metadata')?.textContent ?? '';",
+      "    if (count > 0 || lastMethod.includes('item/') || lastMethod.includes('turn/')) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 200));',
+      '  }',
+      "  throw new Error('Expected live session updates to appear after execution started.');",
+      '})()',
     ].join(' '),
   );
 }
@@ -218,6 +230,21 @@ async function assertCodexReplayKinds(role: string, expectedKinds: string[]) {
       "  const seenKinds = new Set([...document.querySelectorAll('[data-item-type]')].map((node) => node.getAttribute('data-item-type')));",
       '  for (const kind of expectedKinds) {',
       "    if (!seenKinds.has(kind)) throw new Error(`Expected replay surface to render ${kind} for ${role}.`);",
+      '  }',
+      "  if (expectedKinds.includes('fileChange')) {",
+      "    if (!document.querySelector('.thread-file-change-entry')) {",
+      "      throw new Error('Expected readable file change entries instead of a raw blob.');",
+      '    }',
+      "    if (!document.querySelector('.thread-patch-block')) {",
+      "      throw new Error('Expected file change patch text to render.');",
+      '    }',
+      "    const fileChangeText = document.querySelector('[data-item-type=\"fileChange\"]')?.textContent ?? '';",
+      "    if (fileChangeText.includes('\\\\\"path\\\\\"') || fileChangeText.includes('{\"path\"')) {",
+      "      throw new Error('File change item still looks like escaped JSON.');",
+      '    }',
+      '  }',
+      "  if (!document.querySelector('[data-thread-viewer-model=\"codex-native\"]')) {",
+      "    throw new Error('Expected shared Codex-native viewer model.');",
       '  }',
       '})()',
     ].join(' '),
@@ -293,7 +320,9 @@ try {
 
   await runBrowser(['open', baseUrl]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertCodexReplayKinds('planner', ['agentMessage']);
   await assertCodexReplayKinds('implementer', ['reasoning', 'commandExecution', 'fileChange']);
+  await assertCodexReplayKinds('reviewer_a', ['agentMessage']);
   const rootSearch = readEvalString(await browserEval('window.location.search;', true));
   if (rootSearch !== '') {
     throw new Error(`Opening / should not inject a stale change param. Saw ${rootSearch}.`);

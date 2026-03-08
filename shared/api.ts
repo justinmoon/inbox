@@ -22,6 +22,13 @@ export type CodexUserInput = {
   name?: string;
 };
 
+export type CodexFileChangeEntry = {
+  path?: string | null;
+  kind?: string | null;
+  diff?: string | null;
+  note?: string | null;
+};
+
 export type CodexThreadItem =
   | {
       type: 'userMessage';
@@ -60,8 +67,9 @@ export type CodexThreadItem =
   | {
       type: 'fileChange';
       id: string;
-      changes: unknown[];
+      changes: CodexFileChangeEntry[];
       status: string;
+      rawOutput?: string | null;
     }
   | {
       type: 'mcpToolCall';

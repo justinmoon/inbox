@@ -81,6 +81,7 @@ Runtime state stays outside the bundle:
 - the reviewed checkpoint packet stays immutable
 - linked checkpoint sessions are reconstructed from committed rollout history
 - launched thread metadata and live transcript are attached at read time from Codex app-server
+- the right rail auto-updates launched live sessions from app-server notifications with polling fallback
 
 The generated JSON schema lives in
 [`schema/change-unit.bundle.schema.json`](./schema/change-unit.bundle.schema.json).
@@ -105,8 +106,10 @@ paths. The current product does not use the old generated change-unit or SQLite 
 4. opens a stale demo deep link and verifies recovery to the canonical checkpoint
 5. executes the canonical next action and verifies launched state persists
 6. verifies linked and live sessions both render through the Codex-native thread viewer
-7. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
-8. verifies failed execute-next state renders a real retryable error
+7. verifies captured file changes render as readable patch history instead of escaped JSON
+8. verifies the launched live session visibly auto-updates in place
+9. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
+10. verifies failed execute-next state renders a real retryable error
 
 ## Notes
 

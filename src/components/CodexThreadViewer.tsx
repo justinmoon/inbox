@@ -1,7 +1,12 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-import type { CodexThread, CodexThreadItem, CodexUserInput } from '../../shared/api.ts';
+import type {
+  CodexFileChangeEntry,
+  CodexThread,
+  CodexThreadItem,
+  CodexUserInput,
+} from '../../shared/api.ts';
 
 function humanizeToken(value: string): string {
   return value.replaceAll(/([a-z0-9])([A-Z])/g, '$1 $2').replaceAll('_', ' ');
@@ -52,6 +57,52 @@ function summarizeCommandActions(value: unknown): string | null {
       return String(entry);
     })
     .join(' • ');
+}
+
+function renderPatchLines(diff: string) {
+  return diff.split('\n').map((line, index) => {
+    let className = 'thread-patch-line';
+    if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) {
+      className += ' thread-patch-line-meta';
+    } else if (line.startsWith('@@')) {
+      className += ' thread-patch-line-hunk';
+    } else if (line.startsWith('+')) {
+      className += ' thread-patch-line-add';
+    } else if (line.startsWith('-')) {
+      className += ' thread-patch-line-del';
+    }
+
+    return (
+      <span key={`${index}-${line.slice(0, 24)}`} className={className}>
+        {line || ' '}
+      </span>
+    );
+  });
+}
+
+function renderFileChangeEntry(entry: CodexFileChangeEntry, index: number) {
+  const hasHeader = entry.path || entry.kind;
+  const hasDiff = typeof entry.diff === 'string' && entry.diff.trim();
+  const hasNote = typeof entry.note === 'string' && entry.note.trim();
+
+  return (
+    <section key={`${entry.path ?? entry.kind ?? 'file'}-${index}`} className="thread-file-change-entry">
+      {hasHeader ? (
+        <header className="thread-file-change-header">
+          <strong>{entry.path ?? 'Captured patch'}</strong>
+          {entry.kind ? <span>{titleCase(entry.kind)}</span> : null}
+        </header>
+      ) : null}
+
+      {hasNote ? <p className="thread-item-text thread-file-change-note">{entry.note}</p> : null}
+
+      {hasDiff ? (
+        <pre className="thread-code-block thread-patch-block">
+          <code>{renderPatchLines(entry.diff!)}</code>
+        </pre>
+      ) : null}
+    </section>
+  );
 }
 
 function renderMetadataRows(entries: Array<[string, string | null | undefined]>) {
@@ -157,9 +208,21 @@ function ThreadItemBody({ item }: { item: CodexThreadItem }) {
       return (
         <div className="thread-item-stack">
           {renderMetadataRows([['status', fileChangeItem.status]])}
-          <pre className="thread-code-block">
-            <code>{formatJson(fileChangeItem.changes)}</code>
-          </pre>
+          <div className="thread-file-change-list">
+            {fileChangeItem.changes.length > 0 ? (
+              fileChangeItem.changes.map((entry, index) => renderFileChangeEntry(entry, index))
+            ) : (
+              <p className="thread-item-text">No structured file-change entries were captured.</p>
+            )}
+          </div>
+          {fileChangeItem.rawOutput ? (
+            <details className="thread-raw-details">
+              <summary>Tool output</summary>
+              <pre className="thread-code-block thread-command-output">
+                <code>{fileChangeItem.rawOutput}</code>
+              </pre>
+            </details>
+          ) : null}
         </div>
       );
     }
@@ -268,6 +331,29 @@ function ThreadItemBody({ item }: { item: CodexThreadItem }) {
     case 'contextCompaction':
       return <p className="thread-item-text">Context was compacted for this thread.</p>;
     default:
+      if (item.type === 'capturedRecord') {
+        const fallbackItem = item as CodexThreadItem & {
+          source?: unknown;
+          rawType?: unknown;
+          note?: unknown;
+          payload?: unknown;
+        };
+        return (
+          <div className="thread-item-stack">
+            {renderMetadataRows([
+              ['source', typeof fallbackItem.source === 'string' ? fallbackItem.source : 'captured'],
+              ['raw type', typeof fallbackItem.rawType === 'string' ? fallbackItem.rawType : item.type],
+            ])}
+            {typeof fallbackItem.note === 'string' ? (
+              <p className="thread-item-text">{fallbackItem.note}</p>
+            ) : null}
+            <pre className="thread-code-block">
+              <code>{formatJson(fallbackItem.payload ?? fallbackItem)}</code>
+            </pre>
+          </div>
+        );
+      }
+
       return (
         <div className="thread-item-stack">
           <pre className="thread-code-block">
@@ -280,7 +366,7 @@ function ThreadItemBody({ item }: { item: CodexThreadItem }) {
 
 export function CodexThreadViewer({ thread }: { thread: CodexThread }) {
   return (
-    <div className="codex-thread-viewer" data-thread-id={thread.id}>
+    <div className="codex-thread-viewer" data-thread-id={thread.id} data-thread-viewer-model="codex-native">
       {thread.turns.length > 0 ? (
         thread.turns.map((turn, index) => (
           <section key={turn.id} className="codex-turn">

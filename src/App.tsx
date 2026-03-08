@@ -8,6 +8,14 @@ import { SessionReplayPanel } from './components/SessionReplayPanel.tsx';
 import { RequestError, fetchChangeUnitDetail, fetchChangeUnits } from './lib/api.ts';
 import { getSidebarState } from './lib/format.ts';
 
+type LiveSessionUpdates = {
+  mode: 'idle' | 'events' | 'polling';
+  threadId: string | null;
+  eventCount: number;
+  lastEventAt: string | null;
+  lastMethod: string | null;
+};
+
 function readSelectedChangeId(): string | null {
   return new URLSearchParams(window.location.search).get('change');
 }
@@ -61,6 +69,13 @@ export function App() {
   const [preferredSessionId, setPreferredSessionId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
+  const [liveSessionUpdates, setLiveSessionUpdates] = useState<LiveSessionUpdates>({
+    mode: 'idle',
+    threadId: null,
+    eventCount: 0,
+    lastEventAt: null,
+    lastMethod: null,
+  });
   const itemButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const mainReviewRef = useRef<HTMLElement | null>(null);
   const replayPanelRef = useRef<HTMLElement | null>(null);
@@ -242,8 +257,132 @@ export function App() {
       return;
     }
 
-    setPreferredSessionId(currentDetail.live_session_id ?? currentDetail.session_views[0]?.id ?? null);
+    const availableSessionIds = new Set(currentDetail.session_views.map((session) => session.id));
+    const fallbackSessionId =
+      currentDetail.live_session_id ?? currentDetail.session_views[0]?.id ?? null;
+
+    setPreferredSessionId((current) => {
+      if (current && availableSessionIds.has(current)) {
+        return current;
+      }
+
+      return fallbackSessionId;
+    });
   }, [currentDetail?.change_unit.id, currentDetail?.live_session_id, currentDetail?.session_views]);
+
+  useEffect(() => {
+    if (!currentDetail || currentDetail.execution_state.status !== 'launched') {
+      setLiveSessionUpdates({
+        mode: 'idle',
+        threadId: null,
+        eventCount: 0,
+        lastEventAt: null,
+        lastMethod: null,
+      });
+      return;
+    }
+
+    const threadId = currentDetail.execution_state.thread_id;
+    const detailId = currentDetail.change_unit.id;
+    let refreshTimer: number | null = null;
+    let pollingTimer: number | null = null;
+    let source: EventSource | null = null;
+    let disposed = false;
+
+    function scheduleRefresh() {
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
+
+      refreshTimer = window.setTimeout(() => {
+        if (!disposed) {
+          void refreshDetail(detailId);
+        }
+      }, 200);
+    }
+
+    function beginPolling() {
+      setLiveSessionUpdates((current) => ({
+        mode: 'polling',
+        threadId,
+        eventCount: current.threadId === threadId ? current.eventCount : 0,
+        lastEventAt: current.threadId === threadId ? current.lastEventAt : null,
+        lastMethod: current.threadId === threadId ? current.lastMethod : null,
+      }));
+
+      if (pollingTimer !== null) return;
+      pollingTimer = window.setInterval(() => {
+        void refreshDetail(detailId);
+      }, 2000);
+    }
+
+    setLiveSessionUpdates({
+      mode: 'events',
+      threadId,
+      eventCount: 0,
+      lastEventAt: null,
+      lastMethod: null,
+    });
+
+    if (typeof EventSource !== 'undefined') {
+      source = new EventSource(`/api/live-sessions/${encodeURIComponent(threadId)}/events`);
+      source.onopen = () => {
+        if (disposed) return;
+        setLiveSessionUpdates((current) => ({ ...current, mode: 'events', threadId }));
+      };
+      source.onmessage = (event) => {
+        if (disposed) return;
+
+        let method: string | null = null;
+        try {
+          const payload = JSON.parse(event.data) as { method?: unknown };
+          method = typeof payload.method === 'string' ? payload.method : null;
+        } catch {
+          method = null;
+        }
+
+        if (method === 'live/connected') {
+          setLiveSessionUpdates((current) => ({ ...current, mode: 'events', threadId }));
+          return;
+        }
+
+        setLiveSessionUpdates((current) => ({
+          mode: 'events',
+          threadId,
+          eventCount: current.threadId === threadId ? current.eventCount + 1 : 1,
+          lastEventAt: new Date().toISOString(),
+          lastMethod: method,
+        }));
+        scheduleRefresh();
+      };
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        if (!disposed) {
+          beginPolling();
+        }
+      };
+    } else {
+      beginPolling();
+    }
+
+    return () => {
+      disposed = true;
+      source?.close();
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
+      if (pollingTimer !== null) {
+        window.clearInterval(pollingTimer);
+      }
+    };
+  }, [
+    currentDetail?.change_unit.id,
+    currentDetail?.execution_state.status,
+    currentDetail?.execution_state.status === 'launched'
+      ? currentDetail.execution_state.thread_id
+      : null,
+  ]);
 
   function openLiveSession() {
     setPreferredSessionId(currentDetail?.live_session_id ?? null);
@@ -320,6 +459,8 @@ export function App() {
               detail={currentDetail}
               focusRef={replayPanelRef}
               preferredSessionId={preferredSessionId}
+              liveSessionUpdates={liveSessionUpdates}
+              onSelectSession={(sessionId) => setPreferredSessionId(sessionId)}
             />
           ) : (
             <div className="empty-panel">

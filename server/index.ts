@@ -23,6 +23,7 @@ import {
 const config = readConfig(process.env);
 const appServer = new AppServerProcess({ codexBin: config.codexBin });
 const executionStateStore = new ExecutionStateStore(config.runtimeRoot);
+const liveSessionSubscribers = new Map<string, Set<express.Response>>();
 
 let appServerReady: Promise<void> | null = null;
 
@@ -82,6 +83,39 @@ function buildSandboxPolicy() {
   };
 }
 
+function getThreadIdFromNotification(message: Record<string, unknown>): string | null {
+  const params = isObject(message.params) ? message.params : null;
+  if (!params) return null;
+
+  if (typeof params.threadId === 'string') {
+    return params.threadId;
+  }
+
+  if (isObject(params.thread) && typeof params.thread.id === 'string') {
+    return params.thread.id;
+  }
+
+  if (isObject(params.turn) && typeof params.turn.threadId === 'string') {
+    return params.turn.threadId;
+  }
+
+  return null;
+}
+
+function broadcastLiveSessionEvent(threadId: string, message: Record<string, unknown>) {
+  const subscribers = liveSessionSubscribers.get(threadId);
+  if (!subscribers || subscribers.size === 0) return;
+
+  const payload = JSON.stringify({
+    method: typeof message.method === 'string' ? message.method : 'unknown',
+    params: message.params ?? null,
+  });
+
+  for (const response of subscribers) {
+    response.write(`data: ${payload}\n\n`);
+  }
+}
+
 async function ensureAppServerStarted() {
   if (appServer.running) return;
   if (!appServerReady) {
@@ -95,6 +129,12 @@ async function ensureAppServerStarted() {
       const id = typeof message.id === 'number' ? message.id : null;
       if (id === null) return;
       void appServer.respondError(id, 'Interactive approvals are not supported by inbox.');
+    });
+
+    appServer.on('notification', (message) => {
+      const threadId = getThreadIdFromNotification(message);
+      if (!threadId) return;
+      broadcastLiveSessionEvent(threadId, message);
     });
   }
 
@@ -296,6 +336,42 @@ app.post('/api/import-bundle', async (req, res) => {
     const message = error instanceof Error ? error.message : 'Failed to import bundle.';
     res.status(400).json({ error: 'import_failed', message });
   }
+});
+
+app.get('/api/live-sessions/:threadId/events', async (req, res) => {
+  try {
+    await ensureAppServerStarted();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to start Codex app-server.';
+    res.status(500).json({ error: 'live_session_unavailable', message });
+    return;
+  }
+
+  const { threadId } = req.params;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const subscribers = liveSessionSubscribers.get(threadId) ?? new Set<express.Response>();
+  subscribers.add(res);
+  liveSessionSubscribers.set(threadId, subscribers);
+
+  res.write(`data: ${JSON.stringify({ method: 'live/connected', params: { threadId } })}\n\n`);
+
+  const keepAlive = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 15_000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    const currentSubscribers = liveSessionSubscribers.get(threadId);
+    currentSubscribers?.delete(res);
+    if (!currentSubscribers || currentSubscribers.size === 0) {
+      liveSessionSubscribers.delete(threadId);
+    }
+    res.end();
+  });
 });
 
 app.post('/api/dev/reseed', async (_req, res) => {

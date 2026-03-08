@@ -1,13 +1,23 @@
-import { useEffect, useMemo, useState, type RefObject } from 'react';
+import { useMemo, type RefObject } from 'react';
 
 import type { ChangeUnitDetail, CodexSessionView } from '../../shared/api.ts';
 import { formatLongTimestamp } from '../lib/format.ts';
 import { CodexThreadViewer } from './CodexThreadViewer.tsx';
 
+type LiveSessionUpdates = {
+  mode: 'idle' | 'events' | 'polling';
+  threadId: string | null;
+  eventCount: number;
+  lastEventAt: string | null;
+  lastMethod: string | null;
+};
+
 type SessionReplayPanelProps = {
   detail: ChangeUnitDetail;
   preferredSessionId?: string | null;
+  liveSessionUpdates: LiveSessionUpdates;
   focusRef?: RefObject<HTMLElement | null>;
+  onSelectSession: (sessionId: string) => void;
 };
 
 function roleWeight(role: string): number {
@@ -43,22 +53,20 @@ function getSessionMeta(session: CodexSessionView): string {
 export function SessionReplayPanel({
   detail,
   preferredSessionId,
+  liveSessionUpdates,
   focusRef,
+  onSelectSession,
 }: SessionReplayPanelProps) {
   const sessions = useMemo(
     () => [...detail.session_views].sort((a, b) => roleWeight(a.role) - roleWeight(b.role)),
     [detail.session_views],
   );
-  const [activeSessionId, setActiveSessionId] = useState<string>(preferredSessionId ?? sessions[0]?.id ?? '');
-
-  useEffect(() => {
-    const preferredExists =
-      preferredSessionId && sessions.some((session) => session.id === preferredSessionId);
-    setActiveSessionId(preferredExists ? preferredSessionId : (sessions[0]?.id ?? ''));
-  }, [detail.change_unit.id, preferredSessionId, sessions]);
-
   const activeSession =
-    sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? null;
+    sessions.find((session) => session.id === preferredSessionId) ?? sessions[0] ?? null;
+  const liveSession =
+    activeSession?.source_kind === 'live' && activeSession.thread?.id === liveSessionUpdates.threadId
+      ? liveSessionUpdates
+      : null;
 
   return (
     <aside
@@ -101,7 +109,7 @@ export function SessionReplayPanel({
                 className={`session-tab${session.id === activeSession?.id ? ' active' : ''}`}
                 data-session-role={session.role}
                 data-session-source={session.source_kind}
-                onClick={() => setActiveSessionId(session.id)}
+                onClick={() => onSelectSession(session.id)}
                 role="tab"
                 type="button"
               >
@@ -125,6 +133,19 @@ export function SessionReplayPanel({
                   <div className="session-meta">
                     <span>{activeSession.runtime}</span>
                     <span>{getSessionMeta(activeSession)}</span>
+                    {liveSession ? (
+                      <span
+                        className={`live-update-pill live-update-pill-${liveSession.mode}`}
+                        data-live-update-mode={liveSession.mode}
+                        data-live-update-count={String(liveSession.eventCount)}
+                      >
+                        {liveSession.mode === 'events'
+                          ? `Live updates ${liveSession.eventCount > 0 ? `(${liveSession.eventCount})` : ''}`
+                          : liveSession.mode === 'polling'
+                            ? 'Polling for updates'
+                            : 'Live session'}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 
@@ -148,6 +169,18 @@ export function SessionReplayPanel({
                         <code>{activeSession.launched_from.turn_id ?? 'pending'}</code>
                       </dd>
                     </div>
+                    {liveSession?.lastMethod ? (
+                      <div>
+                        <dt>Latest event</dt>
+                        <dd>{liveSession.lastMethod}</dd>
+                      </div>
+                    ) : null}
+                    {liveSession?.lastEventAt ? (
+                      <div>
+                        <dt>Last update</dt>
+                        <dd>{formatLongTimestamp(liveSession.lastEventAt)}</dd>
+                      </div>
+                    ) : null}
                   </dl>
                 ) : null}
 
