@@ -70,6 +70,7 @@ function getApprovalTitle(approval: CodexLiveApproval) {
 
 function getApprovalStatusCopy(approval: CodexLiveApproval) {
   if (approval.status === 'pending') return 'Pending';
+  if (approval.status === 'cleared') return 'Resolved';
   return approval.decision === 'accept' ? 'Accepted' : 'Declined';
 }
 
@@ -359,9 +360,11 @@ export function SessionReplayPanel({
                             </div>
                           ) : (
                             <p className="thread-item-text">
-                              {approval.decision === 'accept'
-                                ? 'Codex was allowed to continue.'
-                                : 'Codex was declined for this action.'}
+                              {approval.status === 'cleared'
+                                ? 'This request is no longer pending.'
+                                : approval.decision === 'accept'
+                                  ? 'Codex was allowed to continue.'
+                                  : 'Codex was declined for this action.'}
                             </p>
                           )}
                         </article>

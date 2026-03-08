@@ -227,10 +227,22 @@ async function injectApproval(kind: 'commandExecution' | 'fileChange') {
     throw new Error('Expected a live thread id before injecting an approval fixture.');
   }
 
-  await postJson(`/api/dev/live-sessions/${encodeURIComponent(threadId)}/approvals/inject`, { kind });
+  const payload = await postJson<{ approval: { request_id: number; thread_id: string } }>(
+    `/api/dev/live-sessions/${encodeURIComponent(threadId)}/approvals/inject`,
+    { kind },
+  );
+
+  return payload.approval;
 }
 
-async function assertApprovalCard(kind: 'commandExecution' | 'fileChange', status: 'pending' | 'answered') {
+async function clearApproval(requestId: number, threadId: string) {
+  await postJson(`/api/dev/live-sessions/${encodeURIComponent(threadId)}/approvals/${requestId}/clear`);
+}
+
+async function assertApprovalCard(
+  kind: 'commandExecution' | 'fileChange',
+  status: 'pending' | 'answered' | 'cleared',
+) {
   await browserEval(
     [
       `const kind = ${JSON.stringify(kind)};`,
@@ -245,6 +257,9 @@ async function assertApprovalCard(kind: 'commandExecution' | 'fileChange', statu
       '}',
       "if (kind === 'fileChange' && !card.textContent?.includes('src/validation.js')) {",
       "  throw new Error('File change approval should show the proposed file path.');",
+      '}',
+      "if (status === 'cleared' && card.textContent?.includes('Declined')) {",
+      "  throw new Error('Cleared approval should not render as declined.');",
       '}',
     ].join(' '),
   );
@@ -432,6 +447,10 @@ try {
   await assertApprovalCard('commandExecution', 'pending');
   await answerApproval('commandExecution', 'accept');
   await assertApprovalCard('commandExecution', 'answered');
+  const clearedApproval = await injectApproval('fileChange');
+  await assertApprovalCard('fileChange', 'pending');
+  await clearApproval(clearedApproval.request_id, clearedApproval.thread_id);
+  await assertApprovalCard('fileChange', 'cleared');
   await injectApproval('fileChange');
   await assertApprovalCard('fileChange', 'pending');
   await answerApproval('fileChange', 'decline');

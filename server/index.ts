@@ -503,6 +503,27 @@ app.post('/api/dev/live-sessions/:threadId/approvals/inject', async (req, res) =
   res.json({ approval });
 });
 
+app.post('/api/dev/live-sessions/:threadId/approvals/:requestId/clear', async (req, res) => {
+  const requestId = Number(req.params.requestId);
+  if (!Number.isFinite(requestId)) {
+    res.status(400).json({ error: 'invalid_request_id', message: 'Approval request id is invalid.' });
+    return;
+  }
+
+  const approval = liveApprovalStore.resolve(req.params.threadId, requestId);
+  if (!approval) {
+    res.status(404).json({ error: 'not_found', message: 'Approval request not found.' });
+    return;
+  }
+
+  broadcastLiveSessionMessage(req.params.threadId, 'serverRequest/resolved', {
+    threadId: req.params.threadId,
+    requestId,
+  });
+
+  res.json({ approval });
+});
+
 app.post('/api/change-units/:id/execute-next', async (req, res) => {
   try {
     const execution = await executeNext(req.params.id);

@@ -75,6 +75,7 @@ export class LiveApprovalStore {
       status: 'pending',
       requested_at: new Date().toISOString(),
       answered_at: null,
+      cleared_at: null,
       decision: null,
       reason: readString(params.reason),
       command: readString(params.command),
@@ -112,6 +113,7 @@ export class LiveApprovalStore {
             status: 'pending',
             requested_at: requestedAt,
             answered_at: null,
+            cleared_at: null,
             decision: null,
             reason: 'Validation fixture: confirm the proposed command before the live turn proceeds.',
             command: 'npm test -- --runInBand',
@@ -135,6 +137,7 @@ export class LiveApprovalStore {
             status: 'pending',
             requested_at: requestedAt,
             answered_at: null,
+            cleared_at: null,
             decision: null,
             reason: 'Validation fixture: confirm the proposed patch before the live turn proceeds.',
             command: null,
@@ -171,7 +174,7 @@ export class LiveApprovalStore {
       throw new Error('Approval request not found.');
     }
 
-    if (record.status === 'answered') {
+    if (record.status !== 'pending') {
       throw new Error('Approval request has already been answered.');
     }
 
@@ -180,6 +183,7 @@ export class LiveApprovalStore {
     record.status = 'answered';
     record.decision = args.decision;
     record.answered_at = new Date().toISOString();
+    record.cleared_at = null;
     return this.#sanitize(record);
   }
 
@@ -188,9 +192,8 @@ export class LiveApprovalStore {
     if (!record) return null;
 
     if (record.status === 'pending') {
-      record.status = 'answered';
-      record.answered_at = record.answered_at ?? new Date().toISOString();
-      record.decision = record.decision ?? 'decline';
+      record.status = 'cleared';
+      record.cleared_at = new Date().toISOString();
     }
 
     return this.#sanitize(record);

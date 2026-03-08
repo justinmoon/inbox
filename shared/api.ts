@@ -163,9 +163,10 @@ export type CodexLiveApproval = {
   item_id: string | null;
   request_method: string;
   approval_kind: 'commandExecution' | 'fileChange' | 'other';
-  status: 'pending' | 'answered';
+  status: 'pending' | 'answered' | 'cleared';
   requested_at: string;
   answered_at: string | null;
+  cleared_at?: string | null;
   decision: 'accept' | 'decline' | null;
   reason?: string | null;
   command?: string | null;

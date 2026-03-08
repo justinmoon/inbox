@@ -1362,6 +1362,10 @@ textarea {
   border-left: 3px solid var(--green);
 }
 
+.approval-card-cleared {
+  border-left: 3px solid var(--slate);
+}
+
 .approval-card-header {
   display: flex;
   justify-content: space-between;
