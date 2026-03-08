@@ -1,0 +1,8 @@
+{
+  "name": "inbox-e2e-20260308-063405",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -20,6 +20,3 @@ import bundle:
 
 validate:
     npm run validate
-
-e2e-codex:
-    npm run e2e:codex

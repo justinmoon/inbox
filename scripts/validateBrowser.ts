@@ -1,41 +1,20 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type { ChangeUnitDetail, ChangeUnitListItem } from '../shared/api.ts';
-
-const port = process.env.PORT ?? '8787';
+const port = process.env.PORT ?? String(8800 + Math.floor(Math.random() * 200));
 const baseUrl = `http://127.0.0.1:${port}`;
-const changeId = process.env.INBOX_VALIDATE_CHANGE_ID ?? 'cu_session_recovery';
-const primaryTitle =
-  process.env.INBOX_VALIDATE_PRIMARY_TITLE ?? 'Recover interrupted Codex sessions into one review packet';
-const secondaryTitle =
-  process.env.INBOX_VALIDATE_SECONDARY_TITLE ?? 'Stabilize bundle imports when repeated seeds collide';
-const requireRefreshButton = process.env.INBOX_VALIDATE_REQUIRE_REFRESH === '1';
-const createRepoPath = process.env.INBOX_VALIDATE_CREATE_REPO_PATH ?? null;
-const createProjectName = process.env.INBOX_VALIDATE_CREATE_PROJECT_NAME ?? null;
-const createGithubRepo = process.env.INBOX_VALIDATE_CREATE_GITHUB_REPO ?? null;
-const createBranchName = process.env.INBOX_VALIDATE_CREATE_BRANCH_NAME ?? null;
-const createPlannerThreadId = process.env.INBOX_VALIDATE_CREATE_PLANNER_THREAD_ID ?? null;
-const createImplementerThreadId = process.env.INBOX_VALIDATE_CREATE_IMPLEMENTER_THREAD_ID ?? null;
-const createReviewerAThreadId = process.env.INBOX_VALIDATE_CREATE_REVIEWER_A_THREAD_ID ?? null;
-const createReviewerBThreadId = process.env.INBOX_VALIDATE_CREATE_REVIEWER_B_THREAD_ID ?? null;
-const appUrl = `${baseUrl}/?change=${encodeURIComponent(changeId)}`;
-const validationDir = path.resolve(process.cwd(), 'artifacts/validation');
-const screenshotPath = path.join(validationDir, 'inbox-prototype.png');
-const tourDir = path.join(validationDir, 'tour');
-const manifestPath = path.join(tourDir, 'manifest.json');
+const validationRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inbox-validate-'));
+const importedRoot = path.join(validationRoot, 'imported-change-units');
+const runtimeRoot = path.join(validationRoot, 'runtime');
+const canonicalBundlePath = path.join(
+  process.cwd(),
+  'seed/change-units/validation-rollup-checkpoint/change-unit.json',
+);
 
-type TourShot = {
-  name: string;
-  kind: 'primary' | 'change-unit' | 'session' | 'mobile' | 'modal';
-  mode: 'desktop' | 'mobile';
-  path: string;
-  change_unit_id: string;
-  title: string;
-  session_role?: string;
-};
+type BundleLike = Record<string, any>;
 
 async function runCommand(command: string, args: string[], captureOutput = false): Promise<string> {
   return await new Promise((resolve, reject) => {
@@ -61,6 +40,7 @@ async function runCommand(command: string, args: string[], captureOutput = false
         resolve(stdout.trim());
         return;
       }
+
       reject(new Error(stderr.trim() || `${command} ${args.join(' ')} exited with code ${code}`));
     });
   });
@@ -68,6 +48,22 @@ async function runCommand(command: string, args: string[], captureOutput = false
 
 async function runBrowser(args: string[], captureOutput = false): Promise<string> {
   return await runCommand('npx', ['agent-browser', ...args], captureOutput);
+}
+
+async function browserEval(source: string, captureOutput = false) {
+  return await runBrowser(['eval', source], captureOutput);
+}
+
+function readEvalString(output: string) {
+  const trimmed = output.trim();
+  if (!trimmed) return '';
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === 'string' ? parsed : String(parsed);
+  } catch {
+    return trimmed;
+  }
 }
 
 async function waitForHealth(timeoutMs = 30_000) {
@@ -79,118 +75,17 @@ async function waitForHealth(timeoutMs = 30_000) {
     } catch {
       // Server still starting.
     }
+
     await delay(500);
   }
-  throw new Error('Timed out waiting for the server health endpoint.');
-}
 
-async function requestJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Request failed for ${url} with ${response.status}`);
-  }
-  return (await response.json()) as T;
+  throw new Error('Timed out waiting for the server health endpoint.');
 }
 
 function assertIncludes(haystack: string, needle: string, description: string) {
   if (!haystack.includes(needle)) {
-    throw new Error(`Expected page text to include "${needle}" (${description}).`);
+    throw new Error(`Expected output to include "${needle}" (${description}).`);
   }
-}
-
-function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
-}
-
-function roleLabel(role: string): string {
-  return role.replaceAll('_', ' ');
-}
-
-function roleWeight(role: string): number {
-  switch (role) {
-    case 'planner':
-      return 0;
-    case 'implementer':
-      return 1;
-    case 'reviewer_a':
-      return 2;
-    case 'reviewer_b':
-      return 3;
-    default:
-      return 9;
-  }
-}
-
-async function setViewport(width: number, height: number) {
-  await runBrowser(['set', 'viewport', String(width), String(height)]);
-}
-
-async function waitForText(text: string) {
-  await runBrowser(['wait', '--text', text]);
-}
-
-async function browserEval(source: string) {
-  await runBrowser(['eval', source]);
-}
-
-async function scrollToTop() {
-  await browserEval('window.scrollTo(0, 0);');
-}
-
-async function clickQueueCard(title: string) {
-  await browserEval(
-    [
-      `const title = ${JSON.stringify(title)};`,
-      "const cards = [...document.querySelectorAll('.queue-card')];",
-      "const card = cards.find((candidate) => candidate.querySelector('h2')?.textContent?.trim() === title);",
-      "if (!card) throw new Error(`Missing queue card: ${title}`);",
-      'card.click();',
-    ].join(' '),
-  );
-}
-
-async function clickSessionTab(label: string) {
-  await browserEval(
-    [
-      `const label = ${JSON.stringify(label)};`,
-      "const tabs = [...document.querySelectorAll('.session-tab')];",
-      "const tab = tabs.find((candidate) => candidate.querySelector('span')?.textContent?.trim() === label);",
-      "if (!tab) throw new Error(`Missing session tab: ${label}`);",
-      'tab.click();',
-    ].join(' '),
-  );
-}
-
-async function fillField(label: string, value: string) {
-  await runBrowser(['find', 'label', label, 'fill', value]);
-}
-
-async function captureFullScreenshot(targetPath: string) {
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await runBrowser(['screenshot', '--full', targetPath]);
-}
-
-async function captureViewportScreenshot(targetPath: string) {
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await runBrowser(['screenshot', targetPath]);
-}
-
-function buildShotPath(prefix: string, title: string): string {
-  return path.join(tourDir, `${prefix}-${slugify(title)}.png`);
-}
-
-async function fetchItems() {
-  const response = await requestJson<{ items: ChangeUnitListItem[] }>(`${baseUrl}/api/change-units`);
-  return response.items;
-}
-
-async function fetchDetail(id: string) {
-  const response = await requestJson<{ detail: ChangeUnitDetail }>(`${baseUrl}/api/change-units/${id}`);
-  return response.detail;
 }
 
 function detectPageErrors(output: string) {
@@ -201,241 +96,228 @@ function detectPageErrors(output: string) {
   throw new Error(`Browser reported page errors:\n${normalized}`);
 }
 
-async function waitForNewChangeUnit(previousIds: Set<string>, timeoutMs = 180_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const items = await fetchItems();
-    const created = items.find((item) => !previousIds.has(item.id));
-    if (created) return created;
-    await delay(1_000);
+async function postJson<T>(pathname: string, body?: unknown): Promise<T> {
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method: 'POST',
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!response.ok) {
+    throw new Error(String(payload?.message ?? `Request failed with ${response.status}`));
   }
-  throw new Error('Timed out waiting for the create-live-packet flow to import a new change unit.');
+
+  return payload as T;
 }
 
-await fs.mkdir(validationDir, { recursive: true });
-await fs.mkdir(tourDir, { recursive: true });
+async function assertSurfaceLoaded(expectedTitle: string, expectedStepTitles: string[]) {
+  await runBrowser(['wait', '--text', expectedTitle]);
+
+  await browserEval(
+    [
+      `const expectedTitle = ${JSON.stringify(expectedTitle)};`,
+      `const expectedSteps = ${JSON.stringify(expectedStepTitles)};`,
+      "const cards = [...document.querySelectorAll('.simple-queue-card')];",
+      "if (cards.length < 1) throw new Error('Expected a non-empty queue.');",
+      "if (document.querySelector('.banner-error')) throw new Error('Recovery should not leave an error banner on screen.');",
+      "const title = document.querySelector('.review-brief h2')?.textContent?.trim();",
+      "if (title !== expectedTitle) throw new Error(`Expected review title ${expectedTitle}, saw ${title}.`);",
+      "const stepTabs = [...document.querySelectorAll('.stepper-tab')];",
+      "const stepTitles = stepTabs.map((node) => node.getAttribute('data-step-title') ?? node.textContent?.trim() ?? '');",
+      "if (stepTitles.length !== expectedSteps.length) {",
+      "  throw new Error(`Expected ${expectedSteps.length} tutorial steps, saw ${stepTitles.length}.`);",
+      '}',
+      "for (let index = 0; index < expectedSteps.length; index += 1) {",
+      "  if (stepTitles[index] !== expectedSteps[index]) {",
+      "    throw new Error(`Expected step ${index + 1} to be ${expectedSteps[index]}, saw ${stepTitles[index]}.`);",
+      '  }',
+      '}',
+      "if (!document.querySelector('.tutorial-step-card')) throw new Error('Tutorial step card is missing.');",
+      "if (!document.querySelector('.replay-panel')) throw new Error('Replay panel is missing.');",
+      "if (!document.body.textContent?.includes('Diff')) throw new Error('Diff section is missing.');",
+    ].join(' '),
+  );
+}
+
+async function assertSelectedStep(title: string, index: number) {
+  await browserEval(
+    [
+      '(async () => {',
+      `  const target = document.querySelectorAll('.stepper-tab')[${index}];`,
+      "  if (!(target instanceof HTMLElement)) throw new Error('Missing target step tab.');",
+      "  target.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 100));',
+      `  const expectedTitle = ${JSON.stringify(title)};`,
+      "  const heading = document.querySelector('.tutorial-step-card h4')?.textContent?.trim();",
+      "  if (heading !== expectedTitle) {",
+      "    throw new Error(`Expected tutorial heading ${expectedTitle}, saw ${heading}.`);",
+      '  }',
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertExecutionLaunched() {
+  await runBrowser(['wait', '--text', 'Next chunk started']);
+  await browserEval(
+    [
+      "const actionState = document.querySelector('[data-execution-state=\"launched\"]');",
+      "if (!actionState) throw new Error('Expected launched execution state.');",
+      "if (!document.querySelector('[data-open-live-session=\"true\"]')) throw new Error('Open Live Session CTA is missing.');",
+      "const threadCode = document.querySelector('.execution-metadata code')?.textContent?.trim();",
+      "if (!threadCode) throw new Error('Expected launched thread id in the action area.');",
+      "const liveCard = document.querySelector('[data-live-session-state=\"launched\"]');",
+      "if (!liveCard) throw new Error('Expected launched live-session card in the replay panel.');",
+      "const liveMetadata = [...document.querySelectorAll('.live-session-metadata code')].map((node) => node.textContent?.trim() ?? '');",
+      "if (liveMetadata.length < 2 || !liveMetadata[0] || !liveMetadata[1]) {",
+      "  throw new Error('Expected launched thread and turn ids in the live session panel.');",
+      '}',
+    ].join(' '),
+  );
+}
+
+async function assertExecutionFailed() {
+  await runBrowser(['wait', '--text', 'Next chunk failed']);
+  await browserEval(
+    [
+      "const failedState = document.querySelector('[data-execution-state=\"failed\"]');",
+      "if (!failedState) throw new Error('Expected failed execution state.');",
+      "const retryButton = [...document.querySelectorAll('button')].find((node) => node.textContent?.includes('Retry Execute Next Prompt'));",
+      "if (!retryButton) throw new Error('Retry action is missing after failed launch.');",
+      "const errorCopy = document.querySelector('.execution-error')?.textContent?.trim();",
+      "if (!errorCopy) throw new Error('Expected a real execute-next failure message.');",
+    ].join(' '),
+  );
+}
+
+await fs.mkdir(importedRoot, { recursive: true });
+await fs.mkdir(runtimeRoot, { recursive: true });
 await runCommand('npx', ['agent-browser', 'install']);
+
+const canonicalBundle = JSON.parse(await fs.readFile(canonicalBundlePath, 'utf8')) as BundleLike;
+const canonicalStepTitles = canonicalBundle.change_unit.tutorial.steps.map(
+  (step: { title: string }) => step.title,
+);
+
+const dynamicFixture = structuredClone(canonicalBundle) as BundleLike;
+
+dynamicFixture.change_unit.id = 'cu_dynamic_tutorial_fixture';
+dynamicFixture.change_unit.title = 'Exercise dynamic tutorial navigation';
+dynamicFixture.change_unit.status = 'needs_revision';
+dynamicFixture.change_unit.tutorial.steps = [
+  { id: 'dynamic-1', title: 'Scope the packet' },
+  { id: 'dynamic-2', title: 'Trace the validator' },
+  { id: 'dynamic-3', title: 'Inspect the replay path' },
+  { id: 'dynamic-4', title: 'Check the runtime state' },
+  { id: 'dynamic-5', title: 'Review the launch error' },
+  { id: 'dynamic-6', title: 'Decide the retry plan' },
+].map((step, index) => ({
+  ...step,
+  intent: `Review fixture step ${index + 1}.`,
+  affected_files: ['src/components/ChangeUnitSurface.tsx'],
+  evidence_snippets: [],
+  body_markdown: `Validation fixture step ${index + 1}.`,
+}));
+dynamicFixture.change_unit.next_action = {
+  kind: 'codex_fork_path',
+  path: 'seed/change-units/validation-rollup-checkpoint/rollouts/does-not-exist.jsonl',
+  prompt: 'Retry the dynamic tutorial fixture.',
+  label: 'Execute Next Prompt',
+};
+
+const dynamicFixturePath = path.join(validationRoot, 'dynamic-tutorial-fixture.json');
+await fs.writeFile(dynamicFixturePath, JSON.stringify(dynamicFixture, null, 2), 'utf8');
+const dynamicStepTitles = dynamicFixture.change_unit.tutorial.steps.map(
+  (step: { title: string }) => step.title,
+);
 
 const server = spawn('npm', ['run', 'start'], {
   cwd: process.cwd(),
   env: {
     ...process.env,
     PORT: port,
+    INBOX_IMPORTED_ROOT: importedRoot,
+    INBOX_RUNTIME_ROOT: runtimeRoot,
   },
   stdio: 'inherit',
 });
 
-const shots: TourShot[] = [];
-let createdItemFromUi: ChangeUnitListItem | null = null;
-
 try {
   await waitForHealth();
   await runBrowser(['close']).catch(() => undefined);
-  await runBrowser(['open', appUrl]);
-  await setViewport(1600, 1100);
-  await waitForText(primaryTitle);
-  await runBrowser(['errors', '--clear']).catch(() => undefined);
-
-  if (secondaryTitle) {
-    await clickQueueCard(secondaryTitle);
-    await waitForText(secondaryTitle);
-    await clickQueueCard(primaryTitle);
-    await waitForText(primaryTitle);
-  }
-
-  await waitForText('Linked sessions');
-  if (requireRefreshButton) {
-    await runBrowser(['find', 'text', 'Refresh from Codex', 'click']);
-    await waitForText('Linked sessions');
-  }
-
-  const pageText = await runBrowser(['get', 'text', 'body'], true);
-  assertIncludes(pageText, 'Inbox Control Room', 'inbox rail renders');
-  assertIncludes(pageText, 'What changed and how to review it', 'tutorial section renders');
-  assertIncludes(pageText, 'Code changes', 'diff section renders');
-  assertIncludes(pageText, 'Linked sessions', 'replay panel renders');
-
-  await scrollToTop();
-  await captureFullScreenshot(screenshotPath);
-
-  let items = await fetchItems();
-  let details = await Promise.all(items.map(async (item) => [item.id, await fetchDetail(item.id)] as const));
-  let detailById = new Map(details);
-  let liveItem = items.find((item) => item.tags.includes('live-codex')) ?? items[0];
-  let liveDetail = detailById.get(liveItem.id);
-
-  shots.push({
-    name: 'primary',
-    kind: 'primary',
-    mode: 'desktop',
-    path: screenshotPath,
-    change_unit_id: changeId,
-    title: primaryTitle,
-  });
 
   await runBrowser(['open', baseUrl]);
-  await setViewport(1600, 1100);
-  await waitForText('Inbox Control Room');
-  await runBrowser(['find', 'text', 'Create Live Packet', 'click']);
-  await waitForText('Create change unit from repo + Codex threads');
-  const modalPath = buildShotPath('desktop-modal', 'create-live-packet');
-  await captureViewportScreenshot(modalPath);
-  shots.push({
-    name: path.basename(modalPath),
-    kind: 'modal',
-    mode: 'desktop',
-    path: modalPath,
-    change_unit_id: 'modal',
-    title: 'Create live packet modal',
-  });
-
-  if (createRepoPath && createImplementerThreadId) {
-    const beforeIds = new Set(items.map((item) => item.id));
-    await fillField('Repo path', createRepoPath);
-    if (createProjectName) await fillField('Project label', createProjectName);
-    if (createGithubRepo) await fillField('GitHub repo', createGithubRepo);
-    if (createBranchName) await fillField('Branch name', createBranchName);
-    if (createPlannerThreadId) await fillField('Planner thread', createPlannerThreadId);
-    await fillField('Implementer thread', createImplementerThreadId);
-    if (createReviewerAThreadId) await fillField('Reviewer A thread', createReviewerAThreadId);
-    if (createReviewerBThreadId) await fillField('Reviewer B thread', createReviewerBThreadId);
-
-    await browserEval(
-      [
-        "const submit = document.querySelector('.modal-shell button[type=\"submit\"]');",
-        "if (!submit) throw new Error('Missing modal submit button');",
-        'submit.click();',
-      ].join(' '),
-    );
-    createdItemFromUi = await waitForNewChangeUnit(beforeIds);
-    const createdItem = createdItemFromUi;
-    await waitForText(createdItem.title);
-    await scrollToTop();
-    await captureFullScreenshot(screenshotPath);
-    const createdPath = buildShotPath('desktop-created', createdItem.title);
-    await captureFullScreenshot(createdPath);
-    shots.push({
-      name: path.basename(createdPath),
-      kind: 'change-unit',
-      mode: 'desktop',
-      path: createdPath,
-      change_unit_id: createdItem.id,
-      title: createdItem.title,
-    });
-
-    items = await fetchItems();
-    details = await Promise.all(items.map(async (item) => [item.id, await fetchDetail(item.id)] as const));
-    detailById = new Map(details);
-    liveItem =
-      items.find((item) => item.id === createdItem.id) ??
-      items.find((item) => item.tags.includes('live-codex')) ??
-      items[0];
-    liveDetail = detailById.get(liveItem.id);
-  } else {
-    await browserEval(
-      [
-        "const closeButton = [...document.querySelectorAll('.modal-shell button')].find((candidate) => candidate.textContent?.trim() === 'Close');",
-        "if (!closeButton) throw new Error('Missing modal close button');",
-        'closeButton.click();',
-      ].join(' '),
-    );
+  await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  const rootSearch = readEvalString(await browserEval('window.location.search;', true));
+  if (rootSearch !== '') {
+    throw new Error(`Opening / should not inject a stale change param. Saw ${rootSearch}.`);
   }
 
-  if (createdItemFromUi && shots[0]) {
-    shots[0] = {
-      ...shots[0],
-      change_unit_id: createdItemFromUi.id,
-      title: createdItemFromUi.title,
-    };
+  await runBrowser(['open', `${baseUrl}/?change=cu_session_recovery`]);
+  await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  const recoveredSearch = readEvalString(await browserEval('window.location.search;', true));
+  assertIncludes(
+    recoveredSearch,
+    'cu_validation_rollup_checkpoint',
+    'stale deep link should recover to the canonical checkpoint URL',
+  );
+  if (recoveredSearch.includes('cu_session_recovery')) {
+    throw new Error('Stale deep link was not cleared from the URL.');
   }
 
-  for (const item of items) {
-    const detail = detailById.get(item.id);
-    if (!detail) continue;
-    await runBrowser(['open', `${baseUrl}/?change=${encodeURIComponent(item.id)}`]);
-    await setViewport(1600, 1100);
-    await waitForText(item.title);
-    await waitForText('What changed and how to review it');
-    await scrollToTop();
-    const targetPath = buildShotPath(`desktop-${String(shots.length).padStart(2, '0')}`, item.title);
-    await captureFullScreenshot(targetPath);
-    shots.push({
-      name: path.basename(targetPath),
-      kind: 'change-unit',
-      mode: 'desktop',
-      path: targetPath,
-      change_unit_id: item.id,
-      title: item.title,
-    });
-  }
-
-  if (liveItem && liveDetail) {
-    await runBrowser(['open', `${baseUrl}/?change=${encodeURIComponent(liveItem.id)}`]);
-    await setViewport(1600, 1100);
-    await waitForText(liveItem.title);
-
-    const orderedSessions = [...liveDetail.agent_sessions].sort((a, b) => roleWeight(a.role) - roleWeight(b.role));
-    for (const session of orderedSessions) {
-      const label = roleLabel(session.role);
-      await clickSessionTab(label);
-      await delay(250);
-      await scrollToTop();
-      const targetPath = buildShotPath(`desktop-session-${slugify(label)}`, liveItem.title);
-      await captureFullScreenshot(targetPath);
-      shots.push({
-        name: path.basename(targetPath),
-        kind: 'session',
-        mode: 'desktop',
-        path: targetPath,
-        change_unit_id: liveItem.id,
-        title: liveItem.title,
-        session_role: session.role,
-      });
-    }
-  }
-
-  for (const item of items) {
-    await runBrowser(['open', `${baseUrl}/?change=${encodeURIComponent(item.id)}`]);
-    await setViewport(430, 932);
-    await waitForText(item.title);
-    await waitForText('What changed and how to review it');
-    await scrollToTop();
-    const targetPath = buildShotPath(`mobile-${String(shots.length).padStart(2, '0')}`, item.title);
-    await captureViewportScreenshot(targetPath);
-    shots.push({
-      name: path.basename(targetPath),
-      kind: 'mobile',
-      mode: 'mobile',
-      path: targetPath,
-      change_unit_id: item.id,
-      title: item.title,
-    });
-  }
-
-  const browserErrors = await runBrowser(['errors'], true).catch(() => '');
-  detectPageErrors(browserErrors);
-
-  await fs.writeFile(
-    manifestPath,
-    `${JSON.stringify(
-      {
-        generated_at: new Date().toISOString(),
-        base_url: baseUrl,
-        primary_change_id: changeId,
-        created_change_id: createdItemFromUi?.id ?? null,
-        created_change_title: createdItemFromUi?.title ?? null,
-        live_change_id: liveItem?.id ?? null,
-        screenshots: shots,
-      },
-      null,
-      2,
-    )}\n`,
-    'utf8',
+  await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
+  await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  const canonicalSearch = readEvalString(await browserEval('window.location.search;', true));
+  assertIncludes(
+    canonicalSearch,
+    'cu_validation_rollup_checkpoint',
+    'canonical deep link should stay on the canonical checkpoint',
   );
 
-  await runBrowser(['close']);
-  console.log(`Browser validation passed. Screenshot: ${screenshotPath}`);
-  console.log(`UX tour manifest: ${manifestPath}`);
+  await assertSelectedStep(canonicalStepTitles.at(-1) ?? canonicalStepTitles[0], canonicalStepTitles.length - 1);
+
+  await browserEval(
+    [
+      "const button = document.querySelector('[data-execute-next=\"true\"]');",
+      "if (!(button instanceof HTMLElement)) throw new Error('Execute Next Prompt button is missing.');",
+      "button.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
+    ].join(' '),
+  );
+  await assertExecutionLaunched();
+
+  await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
+  await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertExecutionLaunched();
+
+  await postJson('/api/import-bundle', { path: dynamicFixturePath });
+  await runBrowser(['open', `${baseUrl}/?change=cu_dynamic_tutorial_fixture`]);
+  await assertSurfaceLoaded(dynamicFixture.change_unit.title, dynamicStepTitles);
+  await assertSelectedStep(dynamicStepTitles[4], 4);
+
+  await browserEval(
+    [
+      "const button = document.querySelector('[data-execute-next=\"true\"]');",
+      "if (!(button instanceof HTMLElement)) throw new Error('Fixture execute button is missing.');",
+      "button.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
+    ].join(' '),
+  );
+  await assertExecutionFailed();
+
+  await runBrowser(['open', `${baseUrl}/?change=cu_dynamic_tutorial_fixture`]);
+  await assertSurfaceLoaded(dynamicFixture.change_unit.title, dynamicStepTitles);
+  await assertExecutionFailed();
+
+  const apiResponse = await browserEval(
+    "fetch('/api/change-units').then((response) => response.json()).then((body) => JSON.stringify(body));",
+    true,
+  );
+  assertIncludes(apiResponse, 'cu_validation_rollup_checkpoint', 'canonical packet id should come from API');
+  assertIncludes(apiResponse, 'cu_dynamic_tutorial_fixture', 'fixture packet id should come from API');
+
+  detectPageErrors(await runBrowser(['errors'], true));
 } finally {
   server.kill('SIGTERM');
+  await new Promise((resolve) => server.once('exit', resolve));
+  await fs.rm(validationRoot, { recursive: true, force: true });
 }

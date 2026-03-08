@@ -1,25 +1,21 @@
 # Inbox
 
-Local web review cockpit for small multi-agent coding changes.
+Local web review cockpit for one real, committed multi-agent checkpoint.
 
-The core unit is a `change_unit`: one reviewed packet with:
+The app currently boots into a single canonical packet:
 
-- executive summary
-- tutorial/explanation
-- diff
-- linked agent sessions
-- review verdicts
-- next proposed chunk
+- bundle: `seed/change-units/validation-rollup-checkpoint/change-unit.json`
+- example project: `seed/change-units/validation-rollup-checkpoint/example-project`
+- real rollouts: `seed/change-units/validation-rollup-checkpoint/rollouts`
 
-The prototype is intentionally inbox-first. It is not a generic chat shell.
+The product is intentionally narrow:
 
-## Stack
-
-- frontend: React + Vite
-- backend: Node + Express
-- persistence: SQLite
-- package contract: JSON bundle validated against [`schema/change-unit.bundle.schema.json`](./schema/change-unit.bundle.schema.json)
-- browser validation: `npx agent-browser` against the built app
+- one inbox rail
+- one reading-first review surface
+- one replay surface
+- one structured tutorial
+- one persisted `Execute Next Prompt` state model
+- one real launched-session surface tied to the reviewed checkpoint
 
 ## Run
 
@@ -37,17 +33,24 @@ npm install
 just dev
 ```
 
-Dev mode starts:
+`just dev` is the frontend-development entrypoint. It expects:
 
-- frontend at `http://127.0.0.1:5173`
-- backend at `http://127.0.0.1:8787`
+- Vite on `http://127.0.0.1:5173`
+- backend on `http://127.0.0.1:8799`
 
-Production-ish local server:
+Vite now uses a strict port. If `5173` is already occupied, `just dev` fails instead of silently
+moving to another port and leaving you on a stale frontend.
+
+For the most reliable read-only product check, use:
 
 ```bash
 just build
 just start
 ```
+
+Then open:
+
+- `http://127.0.0.1:8799/`
 
 ## Commands
 
@@ -57,60 +60,55 @@ just build
 just start
 just typecheck
 just reseed
-just import seed/change-units/01-session-recovery/change-unit.json
+just import seed/change-units/validation-rollup-checkpoint/change-unit.json
 just validate
-just e2e-codex
 ```
 
-## Seed / Import Contract
+## Current Model
 
-Bundles live under [`seed/change-units`](./seed/change-units) and are imported through the same storage path used by the app.
+The runtime contract lives in [`shared/changeUnitBundle.ts`](./shared/changeUnitBundle.ts).
 
-Example:
+The bundle now uses:
 
-```bash
-just import seed/change-units/01-session-recovery/change-unit.json
-```
+- one canonical `change_unit`
+- structured tutorial data with `executive_summary` and tutorial `steps`
+- real linked sessions and review verdicts
+- a narrow executable `next_action`
 
-The JSON schema is checked into:
+Runtime state stays outside the bundle:
 
-- [`schema/change-unit.bundle.schema.json`](./schema/change-unit.bundle.schema.json)
+- execute-next persists `idle` / `launching` / `launched` / `failed`
+- the reviewed checkpoint packet stays immutable
+- launched thread metadata and live transcript are attached at read time
 
-The runtime Zod contract lives in:
+The generated JSON schema lives in
+[`schema/change-unit.bundle.schema.json`](./schema/change-unit.bundle.schema.json).
 
-- [`shared/changeUnitBundle.ts`](./shared/changeUnitBundle.ts)
+## Data Paths
 
-## Live Codex Paths
+Seed bundles live under [`seed/change-units`](./seed/change-units).
 
-The app now has two real Codex-backed flows:
+Imported bundles are copied into `data/imported-change-units/` and override seeded bundles with
+the same `change_unit.id`.
 
-- create a live `change_unit` from a local repo plus Codex thread ids
-- refresh an existing linked session from `codex app-server`
-
-Both flows land in the same bundle/storage model used by imported packets. Live packet creation also tries to ingest real GitHub PR and CI state for the current branch when it can find a GitHub remote and an open PR.
+[`data/README.md`](./data/README.md) explains the ignored stale debris from earlier prototype
+paths. The current product does not use the old generated change-unit or SQLite files there.
 
 ## Validation
 
 `just validate`:
 
-1. builds the frontend
-2. starts the local server
-3. opens the built app in a real browser with `agent-browser`
-4. captures the create-live-packet modal
-5. clicks through the inbox and replay surface
-6. asserts that the review surface, diff, and replay panel render
-7. writes screenshots under `artifacts/validation/`
+1. builds the app
+2. starts the static local server
+3. opens `/`
+4. opens a stale demo deep link and verifies recovery to the canonical checkpoint
+5. executes the canonical next action and verifies launched state persists
+6. verifies the launched thread becomes visible in the replay surface
+7. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
+8. verifies failed execute-next state renders a real retryable error
 
-## Live Codex E2E
+## Notes
 
-`just e2e-codex` runs a full proof loop:
-
-1. creates three throwaway private GitHub repos under `justinmoon` with `gh`
-2. seeds three distinct tiny codebases and pushes `main`
-3. runs real Codex planner, implementer, reviewer A, and reviewer B sessions against each repo
-4. commits the resulting changes onto real feature branches, opens real GitHub PRs, and waits for real GitHub checks
-5. creates two live packets through the app/backend API and one through the in-app create modal driven by `agent-browser`
-6. refreshes linked Codex sessions through the app refresh endpoint
-7. validates the final inbox state in a real browser with `agent-browser`, including a screenshot tour of the major screens and states
-
-Generated evidence lands under `artifacts/e2e/`.
+- `prompt.md` is not part of the current repo state.
+- The current checkpoint is real captured data, not a mock demo.
+- Live Codex generation beyond `Execute Next Prompt` is not part of this repo reset.

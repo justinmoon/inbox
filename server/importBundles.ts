@@ -29,3 +29,35 @@ export async function loadBundleFromPath(bundlePath: string): Promise<ChangeUnit
   const raw = await fs.readFile(bundlePath, 'utf8');
   return parseChangeUnitBundle(JSON.parse(raw));
 }
+
+export async function loadBundlesFromRoots(rootDirs: string[]): Promise<ChangeUnitBundle[]> {
+  const bundlesById = new Map<string, ChangeUnitBundle>();
+
+  for (const rootDir of rootDirs) {
+    for (const bundlePath of await discoverBundleFiles(rootDir)) {
+      const bundle = await loadBundleFromPath(bundlePath);
+      bundlesById.set(bundle.change_unit.id, bundle);
+    }
+  }
+
+  return [...bundlesById.values()];
+}
+
+export async function persistImportedBundle(
+  bundlePath: string,
+  importedRoot: string,
+): Promise<{ bundle: ChangeUnitBundle; targetPath: string }> {
+  const bundle = await loadBundleFromPath(bundlePath);
+  const targetDir = path.join(importedRoot, bundle.change_unit.id);
+  const targetPath = path.join(targetDir, 'change-unit.json');
+
+  await fs.rm(targetDir, { recursive: true, force: true });
+  await fs.mkdir(targetDir, { recursive: true });
+  await fs.writeFile(targetPath, `${JSON.stringify(bundle, null, 2)}\n`, 'utf8');
+
+  return { bundle, targetPath };
+}
+
+export async function clearImportedBundles(importedRoot: string) {
+  await fs.rm(importedRoot, { recursive: true, force: true });
+}

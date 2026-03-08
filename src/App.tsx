@@ -1,60 +1,203 @@
-import { startTransition, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { startTransition, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ChangeUnitDetail, ChangeUnitListItem } from '../shared/api.ts';
-import type { CreateLiveChangeUnitRequest } from '../shared/liveChangeUnit.ts';
-import {
-  createLiveChangeUnit,
-  fetchChangeUnitDetail,
-  fetchChangeUnits,
-  refreshSessionFromCodex,
-  reseedDemo,
-} from './lib/api.ts';
 import { ChangeUnitSurface } from './components/ChangeUnitSurface.tsx';
-import { CreateChangeUnitModal } from './components/CreateChangeUnitModal.tsx';
+import { HotkeyOverlay } from './components/HotkeyOverlay.tsx';
 import { InboxRail } from './components/InboxRail.tsx';
 import { SessionReplayPanel } from './components/SessionReplayPanel.tsx';
+import { RequestError, fetchChangeUnitDetail, fetchChangeUnits } from './lib/api.ts';
+import { getSidebarState } from './lib/format.ts';
+
+function readSelectedChangeId(): string | null {
+  return new URLSearchParams(window.location.search).get('change');
+}
+
+function writeSelectedChangeId(id: string, replace = false) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('change', id);
+  const nextUrl = `${url.pathname}?${url.searchParams.toString()}${url.hash}`;
+
+  if (replace) {
+    window.history.replaceState(null, '', nextUrl);
+    return;
+  }
+
+  window.history.pushState(null, '', nextUrl);
+}
+
+function clearSelectedChangeId(replace = false) {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('change');
+  const search = url.searchParams.toString();
+  const nextUrl = `${url.pathname}${search ? `?${search}` : ''}${url.hash}`;
+
+  if (replace) {
+    window.history.replaceState(null, '', nextUrl);
+    return;
+  }
+
+  window.history.pushState(null, '', nextUrl);
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+
+  return (
+    target.tagName === 'INPUT' ||
+    target.tagName === 'TEXTAREA' ||
+    target.tagName === 'SELECT' ||
+    target.isContentEditable
+  );
+}
 
 export function App() {
-  const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<ChangeUnitListItem[]>([]);
   const [detail, setDetail] = useState<ChangeUnitDetail | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => readSelectedChangeId());
+  const [defaultChangeId, setDefaultChangeId] = useState<string | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
-  const [refreshingSessionId, setRefreshingSessionId] = useState<string | null>(null);
-  const [reseeding, setReseeding] = useState(false);
-  const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [creatingLivePacket, setCreatingLivePacket] = useState(false);
-  const [createErrorMessage, setCreateErrorMessage] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [replayMode, setReplayMode] = useState<'linked' | 'live'>('linked');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
+  const itemButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const mainReviewRef = useRef<HTMLElement | null>(null);
+  const replayPanelRef = useRef<HTMLElement | null>(null);
 
-  const selectedId = searchParams.get('change');
+  const mainQueueItems = useMemo(
+    () => items.filter((item) => getSidebarState(item.status) !== 'landed'),
+    [items],
+  );
+  const landedItems = useMemo(
+    () => items.filter((item) => getSidebarState(item.status) === 'landed'),
+    [items],
+  );
+
+  useEffect(() => {
+    const onPopState = () => setSelectedId(readSelectedChangeId());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   useEffect(() => {
     void refreshList();
   }, []);
 
   useEffect(() => {
-    if (items.length === 0) return;
-    const nextId = selectedId ?? items[0]?.id ?? null;
-    if (!nextId) return;
-    if (!selectedId) {
-      startTransition(() => {
-        setSearchParams({ change: nextId }, { replace: true });
-      });
+    if (loadingList) {
       return;
     }
+
+    if (items.length === 0) {
+      setDetail(null);
+      if (selectedId) {
+        startTransition(() => {
+          setSelectedId(null);
+          clearSelectedChangeId(true);
+        });
+      }
+      return;
+    }
+
+    const fallbackId =
+      defaultChangeId ?? mainQueueItems[0]?.id ?? landedItems[0]?.id ?? items[0]?.id ?? null;
+    const selectionStillExists = selectedId ? items.some((item) => item.id === selectedId) : false;
+    const nextId = selectionStillExists ? selectedId : fallbackId;
+
+    if (!nextId) {
+      setDetail(null);
+      return;
+    }
+
+    if (nextId !== selectedId) {
+      startTransition(() => {
+        setSelectedId(nextId);
+        if (selectedId) {
+          writeSelectedChangeId(nextId, true);
+        }
+      });
+      setErrorMessage(null);
+      return;
+    }
+
     void refreshDetail(nextId);
-  }, [items, selectedId, setSearchParams]);
+  }, [defaultChangeId, items, landedItems, loadingList, mainQueueItems, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    itemButtonRefs.current.get(selectedId)?.scrollIntoView({ block: 'nearest' });
+  }, [selectedId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isTypingTarget(event.target) && event.key !== 'Escape') return;
+
+      if (event.key === '?' || (event.key === '/' && event.shiftKey)) {
+        event.preventDefault();
+        setHelpOpen((current) => !current);
+        return;
+      }
+
+      if (event.key === 'Escape' && helpOpen) {
+        event.preventDefault();
+        setHelpOpen(false);
+        return;
+      }
+
+      if (helpOpen) return;
+
+      switch (event.key) {
+        case 'j':
+          event.preventDefault();
+          moveSelection(1);
+          break;
+        case 'k':
+          event.preventDefault();
+          moveSelection(-1);
+          break;
+        case 'm':
+          event.preventDefault();
+          mainReviewRef.current?.focus();
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [helpOpen, mainQueueItems, selectedId]);
+
+  function selectChangeUnit(id: string, replace = false) {
+    startTransition(() => {
+      setSelectedId(id);
+      writeSelectedChangeId(id, replace);
+    });
+  }
+
+  function moveSelection(delta: 1 | -1) {
+    if (mainQueueItems.length === 0) return;
+
+    const currentIndex = selectedId ? mainQueueItems.findIndex((item) => item.id === selectedId) : -1;
+    const startIndex = currentIndex >= 0 ? currentIndex : 0;
+    const nextIndex = (startIndex + delta + mainQueueItems.length) % mainQueueItems.length;
+    selectChangeUnit(mainQueueItems[nextIndex].id);
+  }
 
   async function refreshList() {
     setLoadingList(true);
     setErrorMessage(null);
+
     try {
-      const nextItems = await fetchChangeUnits();
-      setItems(nextItems);
+      const response = await fetchChangeUnits();
+      setItems(response.items);
+      setDefaultChangeId(response.default_change_id);
+      setEmptyMessage(response.empty_message);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load inbox');
+      setItems([]);
+      setDetail(null);
+      setDefaultChangeId(null);
+      setEmptyMessage(null);
+      setErrorMessage(error instanceof Error ? error.message : 'Failed to load inbox.');
     } finally {
       setLoadingList(false);
     }
@@ -62,117 +205,107 @@ export function App() {
 
   async function refreshDetail(id: string) {
     setLoadingDetail(true);
-    setErrorMessage(null);
+
     try {
-      setDetail(await fetchChangeUnitDetail(id));
+      const nextDetail = await fetchChangeUnitDetail(id);
+      setDetail(nextDetail);
+      setErrorMessage(null);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load change unit');
+      if (error instanceof RequestError && error.status === 404) {
+        setDetail(null);
+        setErrorMessage(null);
+        const fallbackId = defaultChangeId ?? mainQueueItems[0]?.id ?? landedItems[0]?.id ?? null;
+        if (fallbackId && fallbackId !== id) {
+          startTransition(() => {
+            setSelectedId(fallbackId);
+            writeSelectedChangeId(fallbackId, true);
+          });
+        } else {
+          void refreshList();
+        }
+      } else {
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to load change unit.');
+      }
     } finally {
       setLoadingDetail(false);
     }
   }
 
-  async function handleReseed() {
-    setReseeding(true);
-    setErrorMessage(null);
-    try {
-      await reseedDemo();
-      const nextItems = await fetchChangeUnits();
-      setItems(nextItems);
-      const nextId = nextItems[0]?.id ?? null;
-      if (nextId) {
-        startTransition(() => {
-          setSearchParams({ change: nextId }, { replace: true });
-        });
-      }
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to reseed demo');
-    } finally {
-      setReseeding(false);
-    }
-  }
-
-  async function handleRefreshFromCodex(sessionId: string) {
-    if (!selectedId) return;
-    setRefreshingSessionId(sessionId);
-    try {
-      await refreshSessionFromCodex(selectedId, sessionId);
-      await refreshDetail(selectedId);
-    } catch (error) {
-      try {
-        await refreshDetail(selectedId);
-      } catch (refreshError) {
-        setErrorMessage(
-          refreshError instanceof Error ? refreshError.message : 'Failed to refresh session from Codex',
-        );
-      }
-    } finally {
-      setRefreshingSessionId(null);
-    }
-  }
-
-  async function handleCreateLivePacket(input: CreateLiveChangeUnitRequest) {
-    setCreatingLivePacket(true);
-    setCreateErrorMessage(null);
-    try {
-      const response = await createLiveChangeUnit(input);
-      const nextItems = await fetchChangeUnits();
-      setItems(nextItems);
-      setCreateModalOpen(false);
-      startTransition(() => {
-        setSearchParams({ change: response.imported });
-      });
-    } catch (error) {
-      setCreateErrorMessage(error instanceof Error ? error.message : 'Failed to create live change unit');
-    } finally {
-      setCreatingLivePacket(false);
-    }
-  }
-
   const currentDetail = useMemo(() => {
-    if (!detail) return null;
-    if (selectedId && detail.change_unit.id !== selectedId) return null;
-    return detail;
+    if (!detail || !selectedId) return null;
+    return detail.change_unit.id === selectedId ? detail : null;
   }, [detail, selectedId]);
 
-  const suggestedRepoPath =
-    currentDetail?.project.worktree_path ?? items[0]?.project.worktree_path ?? '/Users/justin/code';
+  useEffect(() => {
+    if (!currentDetail) {
+      setReplayMode('linked');
+      return;
+    }
+
+    setReplayMode(currentDetail.live_session ? 'live' : 'linked');
+  }, [currentDetail?.change_unit.id, currentDetail?.live_session?.thread_id]);
+
+  function openLiveSession() {
+    setReplayMode('live');
+    replayPanelRef.current?.focus();
+  }
+
+  async function refreshCurrentDetail() {
+    if (!selectedId) return;
+    await refreshDetail(selectedId);
+  }
 
   return (
     <>
       <div className="app-shell">
         <InboxRail
-          items={items}
+          items={mainQueueItems}
+          landedItems={landedItems}
           selectedId={selectedId}
-          onSelect={(id) => {
-            startTransition(() => {
-              setSearchParams({ change: id });
-            });
+          emptyMessage={errorMessage ?? emptyMessage}
+          onItemRef={(id, node) => {
+            if (node) {
+              itemButtonRefs.current.set(id, node);
+              return;
+            }
+            itemButtonRefs.current.delete(id);
           }}
-          onOpenCreate={() => setCreateModalOpen(true)}
-          onReseed={() => void handleReseed()}
-          reseeding={reseeding}
+          onSelect={(id) => selectChangeUnit(id)}
         />
 
         <div className="main-column">
           {errorMessage ? (
             <div className="banner banner-error">
-              <strong>Loading failed.</strong>
+              <strong>Request failed.</strong>
               <span>{errorMessage}</span>
             </div>
           ) : null}
 
           {loadingList ? (
             <div className="empty-state">
-              <h2>Loading inbox…</h2>
-              <p>Reading persisted change units and assembling the queue.</p>
+              <h2>Loading inbox</h2>
+              <p>Reading seeded and imported change units.</p>
+            </div>
+          ) : items.length === 0 ? (
+            <div className="empty-state">
+              <h2>No change units available</h2>
+              <p>
+                {errorMessage ??
+                  emptyMessage ??
+                  'No seeded or imported change units are available right now.'}
+              </p>
             </div>
           ) : currentDetail ? (
-            <ChangeUnitSurface detail={currentDetail} />
+            <ChangeUnitSurface
+              detail={currentDetail}
+              focusRef={mainReviewRef}
+              onExecutionStateChange={() => refreshCurrentDetail()}
+              onOpenLiveSession={() => openLiveSession()}
+            />
           ) : (
             <div className="empty-state">
-              <h2>No change unit selected</h2>
-              <p>Pick a packet from the inbox to load the review surface.</p>
+              <h2>Recovering selection</h2>
+              <p>Switching to the canonical checkpoint for this session.</p>
             </div>
           )}
         </div>
@@ -180,33 +313,38 @@ export function App() {
         <div className="right-column">
           {loadingDetail && !currentDetail ? (
             <div className="empty-panel">
-              <p>Loading session replay…</p>
+              <p>Loading replay…</p>
             </div>
           ) : currentDetail ? (
             <SessionReplayPanel
               detail={currentDetail}
-              refreshingSessionId={refreshingSessionId}
-              onRefreshFromCodex={(sessionId) => void handleRefreshFromCodex(sessionId)}
+              focusRef={replayPanelRef}
+              mode={replayMode}
+              onModeChange={setReplayMode}
             />
           ) : (
             <div className="empty-panel">
-              <p>Session replay will appear here once a change unit is selected.</p>
+              <p>Replay will appear here for the selected change unit.</p>
             </div>
           )}
         </div>
       </div>
 
-      <CreateChangeUnitModal
-        open={createModalOpen}
-        pending={creatingLivePacket}
-        errorMessage={createErrorMessage}
-        suggestedRepoPath={suggestedRepoPath}
-        onClose={() => {
-          setCreateModalOpen(false);
-          setCreateErrorMessage(null);
-        }}
-        onSubmit={(input) => void handleCreateLivePacket(input)}
-      />
+      <button
+        className="floating-help-button"
+        aria-label="Open keyboard shortcuts help"
+        aria-haspopup="dialog"
+        aria-expanded={helpOpen}
+        onClick={() => setHelpOpen(true)}
+        type="button"
+      >
+        <span className="floating-help-glyph" aria-hidden="true">
+          ?
+        </span>
+        <span>Keys</span>
+      </button>
+
+      <HotkeyOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </>
   );
 }

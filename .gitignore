@@ -7,4 +7,5 @@ dist
 .playwright-browsers
 data/*
 !data/.gitkeep
+!data/README.md
 artifacts/*

@@ -1,156 +1,354 @@
+import { useEffect, useMemo, useState, type RefObject } from 'react';
+
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import type { ChangeUnitDetail } from '../../shared/api.ts';
-import { formatLongTimestamp, reviewVerdictMeta, statusMeta, validationMeta } from '../lib/format.ts';
+import { executeNextAction } from '../lib/api.ts';
+import {
+  formatLongTimestamp,
+  getReviewVerdictMeta,
+  getSidebarState,
+  getSidebarStateLabel,
+} from '../lib/format.ts';
+import { parseUnifiedDiff } from '../lib/diff.ts';
 import { DiffViewer } from './DiffViewer.tsx';
 
 type ChangeUnitSurfaceProps = {
   detail: ChangeUnitDetail;
+  focusRef?: RefObject<HTMLElement | null>;
+  onExecutionStateChange: () => Promise<void>;
+  onOpenLiveSession: () => void;
 };
 
-function VerdictSummary({ detail }: { detail: ChangeUnitDetail }) {
-  return (
-    <div className="verdict-summary-grid">
-      {detail.review_verdicts.map((verdict) => (
-        <article key={verdict.id} className={`verdict-summary tone-${reviewVerdictMeta[verdict.verdict].tone}`}>
-          <div>
-            <p className="section-label">{verdict.reviewer_role.replaceAll('_', ' ')}</p>
-            <h4>{reviewVerdictMeta[verdict.verdict].label}</h4>
-          </div>
-          <p>{verdict.summary}</p>
-        </article>
-      ))}
-    </div>
-  );
-}
-
-export function ChangeUnitSurface({ detail }: ChangeUnitSurfaceProps) {
+export function ChangeUnitSurface({
+  detail,
+  focusRef,
+  onExecutionStateChange,
+  onOpenLiveSession,
+}: ChangeUnitSurfaceProps) {
   const { change_unit: changeUnit } = detail;
+  const sidebarState = getSidebarState(changeUnit.status);
+  const stateLabel = getSidebarStateLabel(changeUnit.status);
+  const changedFiles = useMemo(() => parseUnifiedDiff(changeUnit.diff), [changeUnit.diff]);
+  const tutorial = changeUnit.tutorial;
+  const [activeStepId, setActiveStepId] = useState<string>(tutorial.steps[0]?.id ?? '');
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [localExecuteError, setLocalExecuteError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setActiveStepId(tutorial.steps[0]?.id ?? '');
+    setIsExecuting(false);
+    setLocalExecuteError(null);
+  }, [changeUnit.id, tutorial.steps]);
+
+  const totalSteps = tutorial.steps.length;
+  const activeStepIndex = Math.max(
+    0,
+    tutorial.steps.findIndex((step) => step.id === activeStepId),
+  );
+  const activeStep = tutorial.steps[activeStepIndex] ?? tutorial.steps[0];
+  const promptExpanded =
+    sidebarState === 'needs_attention' && detail.execution_state.status !== 'launched';
+  const effectiveExecutionStatus = isExecuting ? 'launching' : detail.execution_state.status;
+  const executionError =
+    detail.execution_state.status === 'failed'
+      ? detail.execution_state.error_message
+      : localExecuteError;
+
+  async function handleExecuteNext() {
+    if (!changeUnit.next_action || effectiveExecutionStatus === 'launching') return;
+
+    setIsExecuting(true);
+    setLocalExecuteError(null);
+
+    try {
+      await executeNextAction(changeUnit.id);
+      await onExecutionStateChange();
+    } catch (error) {
+      setLocalExecuteError(error instanceof Error ? error.message : 'Failed to execute next action.');
+      await onExecutionStateChange().catch(() => undefined);
+    } finally {
+      setIsExecuting(false);
+    }
+  }
+
+  function goToStep(index: number) {
+    const nextStep = tutorial.steps[index];
+    if (!nextStep) return;
+    setActiveStepId(nextStep.id);
+  }
 
   return (
-    <main className="review-surface">
-      <section className="hero-card">
-        <div className="hero-heading">
-          <div>
-            <p className="eyebrow">Review Surface</p>
-            <h2>{changeUnit.title}</h2>
-            <p className="hero-meta">
-              {detail.project.name} · updated {formatLongTimestamp(changeUnit.updated_at)} ·{' '}
-              {detail.project.worktree_path}
-            </p>
-          </div>
-          <div className="hero-statuses">
-            <span className={`status-pill tone-${statusMeta[changeUnit.status].tone}`}>
-              {statusMeta[changeUnit.status].label}
-            </span>
-            <span className={`status-pill tone-${validationMeta[changeUnit.validation.state].tone}`}>
-              {validationMeta[changeUnit.validation.state].label}
-            </span>
-          </div>
-        </div>
+    <main
+      ref={focusRef}
+      className="review-surface"
+      data-focus-root="main-review"
+      aria-label="Main review surface"
+      tabIndex={-1}
+    >
+      <section className="review-brief article-surface">
+        <p className="eyebrow">Review brief</p>
+        <h2>{changeUnit.title}</h2>
 
-        <p className="hero-summary">{changeUnit.executive_summary}</p>
-
-        <div className="hero-tags">
-          {changeUnit.tags.map((tag) => (
-            <span key={tag} className="meta-pill">
-              {tag}
-            </span>
-          ))}
-          {changeUnit.pr.branch_name ? <span className="meta-pill">{changeUnit.pr.branch_name}</span> : null}
-        </div>
-      </section>
-
-      <section className="status-board">
-        <article className="section-card status-card">
-          <p className="section-label">PR</p>
-          <h3>{changeUnit.pr.status}</h3>
-          <p>{changeUnit.pr.number ? `PR #${changeUnit.pr.number}` : 'No live PR linked yet.'}</p>
-          {changeUnit.pr.url ? (
-            <a href={changeUnit.pr.url} target="_blank" rel="noreferrer">
-              Open PR
-            </a>
+        <div className="surface-topline">
+          <span className={`binary-state-pill binary-state-${sidebarState}`}>{stateLabel}</span>
+          {detail.review_verdicts.length > 0 ? (
+            <div className="verdict-strip" aria-label="Review verdicts">
+              {detail.review_verdicts.map((verdict) => {
+                const meta = getReviewVerdictMeta(verdict.verdict);
+                return (
+                  <span key={verdict.id} className={`verdict-pill verdict-pill-${meta.tone}`}>
+                    {verdict.reviewer_role.replaceAll('_', ' ')}: {meta.label}
+                  </span>
+                );
+              })}
+            </div>
           ) : null}
-        </article>
+        </div>
 
-        <article className="section-card status-card">
-          <p className="section-label">Validation</p>
-          <h3>{changeUnit.validation.summary}</h3>
-          <ul className="check-list">
-            {changeUnit.validation.checks.map((check) => (
-              <li key={check.id}>
-                <span className={`status-pill compact tone-${validationMeta[check.state].tone}`}>
-                  {validationMeta[check.state].label}
+        <section className="changed-files-block" aria-labelledby="changed-files-title">
+          <div className="section-heading compact-heading">
+            <div>
+              <p className="eyebrow">Files changed</p>
+              <h3 id="changed-files-title">{changedFiles.length} files in scope</h3>
+            </div>
+          </div>
+
+          <div className="changed-files-list">
+            {changedFiles.map((file) => (
+              <div key={file.id} className="changed-file-chip">
+                <span className="changed-file-path">{file.displayPath}</span>
+                <span className="diff-counts">
+                  <span className="diff-add">+{file.additions}</span>
+                  <span className="diff-del">-{file.deletions}</span>
                 </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <p className="brief-summary">{tutorial.executive_summary}</p>
+
+        <section className="tutorial-stepper" aria-labelledby="tutorial-stepper-title">
+          <div className="section-heading tutorial-stepper-header">
+            <div>
+              <p className="eyebrow">Tutorial</p>
+              <h3 id="tutorial-stepper-title">
+                Step {activeStepIndex + 1} of {totalSteps}
+              </h3>
+            </div>
+
+            {totalSteps > 1 ? (
+              <div className="stepper-direction-controls">
+                <button
+                  className="ghost-button"
+                  disabled={activeStepIndex === 0}
+                  onClick={() => goToStep(activeStepIndex - 1)}
+                  type="button"
+                >
+                  Previous
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={activeStepIndex >= totalSteps - 1}
+                  onClick={() => goToStep(activeStepIndex + 1)}
+                  type="button"
+                >
+                  Next
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="stepper-nav-scroll">
+            <div className="stepper-nav" role="tablist" aria-label="Tutorial steps">
+              {tutorial.steps.map((step, index) => (
+                <button
+                  key={step.id}
+                  className={`stepper-tab${step.id === activeStep?.id ? ' is-active' : ''}`}
+                  data-step-title={step.title}
+                  onClick={() => setActiveStepId(step.id)}
+                  role="tab"
+                  type="button"
+                >
+                  <span className="stepper-index">{index + 1}</span>
+                  <span className="stepper-title">{step.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {activeStep ? (
+            <article className="tutorial-step-card">
+              <header className="tutorial-step-header">
                 <div>
-                  <strong>{check.label}</strong>
-                  <p>{check.detail}</p>
+                  <p className="section-label">Step title</p>
+                  <h4>{activeStep.title}</h4>
                 </div>
-              </li>
-            ))}
-          </ul>
-        </article>
+                <p className="tutorial-step-intent">{activeStep.intent}</p>
+              </header>
 
-        <article className="section-card status-card">
-          <p className="section-label">Next Proposed Chunk</p>
-          <h3>Ready to hand off</h3>
-          <pre className="prompt-block">{changeUnit.next_prompt}</pre>
-        </article>
+              {activeStep.affected_files.length > 0 ? (
+                <div className="tutorial-files">
+                  <p className="section-label">Affected files</p>
+                  <div className="tutorial-file-list">
+                    {activeStep.affected_files.map((file) => (
+                      <span key={file} className="tutorial-file-chip">
+                        {file}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {activeStep.evidence_snippets.length > 0 ? (
+                <div className="evidence-list">
+                  {activeStep.evidence_snippets.map((snippet) => (
+                    <figure key={snippet.id} className="evidence-card">
+                      <figcaption>{snippet.label}</figcaption>
+                      <pre>
+                        <code>{snippet.snippet}</code>
+                      </pre>
+                    </figure>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="tutorial-step-body markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {activeStep.body_markdown}
+                </ReactMarkdown>
+              </div>
+            </article>
+          ) : null}
+        </section>
       </section>
 
-      {detail.review_verdicts.length > 0 ? (
-        <section className="section-card">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Review verdicts</p>
-              <h3>Safety and landing posture</h3>
-            </div>
-          </div>
-          <VerdictSummary detail={detail} />
-        </section>
-      ) : null}
-
-      <section className="section-card narrative-card">
-        <div className="section-heading">
+      <section
+        className={`surface-card action-area ${promptExpanded ? 'is-expanded' : 'is-collapsed'}`}
+        data-next-prompt-mode={promptExpanded ? 'expanded' : 'collapsed'}
+        data-execution-state={effectiveExecutionStatus}
+      >
+        <div className="section-heading action-area-header">
           <div>
-            <p className="eyebrow">Tutorial</p>
-            <h3>What changed and how to review it</h3>
+            <p className="eyebrow">Next action</p>
+            <h3>
+              {effectiveExecutionStatus === 'launching'
+                ? 'Launching next chunk'
+                : detail.execution_state.status === 'launched'
+                  ? 'Next chunk started'
+                  : detail.execution_state.status === 'failed'
+                    ? 'Next chunk failed'
+                    : promptExpanded
+                      ? 'Take the next step'
+                      : 'Prepared follow-up'}
+            </h3>
           </div>
+
+          {changeUnit.next_action ? (
+            detail.execution_state.status === 'launched' ? (
+              <button
+                className="solid-button execute-next-button"
+                data-open-live-session="true"
+                onClick={onOpenLiveSession}
+                type="button"
+              >
+                Open Live Session
+              </button>
+            ) : (
+              <button
+                className="solid-button execute-next-button"
+                data-execute-next="true"
+                disabled={effectiveExecutionStatus === 'launching'}
+                onClick={() => void handleExecuteNext()}
+                type="button"
+              >
+                {effectiveExecutionStatus === 'launching'
+                  ? 'Launching…'
+                  : detail.execution_state.status === 'failed'
+                    ? 'Retry Execute Next Prompt'
+                    : changeUnit.next_action.label ?? 'Execute Next Prompt'}
+              </button>
+            )
+          ) : null}
         </div>
-        <div className="markdown-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{changeUnit.tutorial_markdown}</ReactMarkdown>
-        </div>
+
+        <p className="action-intro">
+          {effectiveExecutionStatus === 'launching'
+            ? 'Launching the configured next chunk. This review packet stays immutable while the live work starts in parallel.'
+            : detail.execution_state.status === 'launched'
+              ? 'The reviewed checkpoint remains fixed here. The next chunk is now running as a separate live Codex session you can open from the replay panel.'
+              : detail.execution_state.status === 'failed'
+                ? 'The launch failed. The checkpoint is unchanged and you can retry after reviewing the real error below.'
+                : promptExpanded
+                  ? 'This packet needs a real follow-up. The action below forks or resumes the configured Codex thread and starts the next turn against the committed example project.'
+                  : 'This packet does not need you yet. The prepared follow-up stays here as supporting context until the unit moves back into attention.'}
+        </p>
+
+        {detail.execution_state.status === 'launched' ? (
+          <div className="execution-record" data-execution-result="true">
+            <p className="execution-note">
+              {detail.execution_state.message ?? 'Started the next chunk successfully.'}
+            </p>
+            <dl className="execution-metadata">
+              <div>
+                <dt>Thread</dt>
+                <dd>
+                  <code>{detail.execution_state.thread_id}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>Turn</dt>
+                <dd>
+                  <code>{detail.execution_state.turn_id}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>Started</dt>
+                <dd>{formatLongTimestamp(detail.execution_state.started_at)}</dd>
+              </div>
+              <div>
+                <dt>Source</dt>
+                <dd>{detail.execution_state.thread_source}</dd>
+              </div>
+            </dl>
+          </div>
+        ) : null}
+
+        {executionError ? <p className="execution-note execution-error">{executionError}</p> : null}
+
+        {changeUnit.next_action ? (
+          promptExpanded ? (
+            <div className="next-prompt-body markdown-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {changeUnit.next_action.prompt}
+              </ReactMarkdown>
+            </div>
+          ) : (
+            <details className="next-prompt-details">
+              <summary>Show prepared next prompt</summary>
+              <div className="next-prompt-body markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {changeUnit.next_action.prompt}
+                </ReactMarkdown>
+              </div>
+            </details>
+          )
+        ) : (
+          <p className="muted-copy">No executable next action is attached to this packet.</p>
+        )}
       </section>
 
-      {detail.artifacts.length > 0 ? (
-        <section className="section-card">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Artifacts</p>
-              <h3>Attached references</h3>
-            </div>
-          </div>
-          <div className="artifact-grid">
-            {detail.artifacts.map((artifact) => (
-              <article key={artifact.id} className="artifact-card">
-                <p className="section-label">{artifact.kind}</p>
-                <strong>{artifact.label}</strong>
-                <code>{artifact.path_or_blob_ref}</code>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <section className="section-card diff-card">
+      <section className="surface-card diff-card reading-section">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Diff</p>
             <h3>Code changes</h3>
           </div>
         </div>
-        <DiffViewer diffText={changeUnit.diff_text} />
+
+        <DiffViewer diffText={changeUnit.diff} />
       </section>
     </main>
   );

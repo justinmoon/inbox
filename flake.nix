@@ -27,20 +27,14 @@
         { pkgs, ... }:
         {
           default = pkgs.mkShell {
-            packages =
-              with pkgs;
-              [
-                nodejs_24
-                git
-                jq
-                ripgrep
-                just
-                sqlite
-                pkg-config
-                python3
-                curl
-              ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.gcc ];
+            packages = with pkgs; [
+              nodejs_24
+              git
+              jq
+              ripgrep
+              just
+              curl
+            ];
 
             shellHook = ''
               export INBOX_BROWSER_CACHE="$PWD/.playwright-browsers"
