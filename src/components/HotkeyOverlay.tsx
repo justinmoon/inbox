@@ -6,7 +6,12 @@ type HotkeyOverlayProps = {
 const shortcuts = [
   { keys: ['j'], description: 'Next unit' },
   { keys: ['k'], description: 'Previous unit' },
+  { keys: ['['], description: 'Previous session' },
+  { keys: [']'], description: 'Next session' },
+  { keys: ['Shift', 'H'], description: 'Shrink replay pane' },
+  { keys: ['Shift', 'L'], description: 'Grow replay pane' },
   { keys: ['m'], description: 'Focus main review surface' },
+  { keys: ['r'], description: 'Toggle replay focus mode' },
   { keys: ['?'], description: 'Open or close this help' },
   { keys: ['Esc'], description: 'Close help' },
 ];
@@ -41,7 +46,9 @@ export function HotkeyOverlay({ open, onClose }: HotkeyOverlayProps) {
           ))}
         </div>
 
-        <p className="hotkey-note">Selection moves in a fixed list order. Landed work stays out of the main queue.</p>
+        <p className="hotkey-note">
+          Unit selection and session navigation stay in fixed order. Replay width persists across reloads.
+        </p>
       </div>
     </div>
   );

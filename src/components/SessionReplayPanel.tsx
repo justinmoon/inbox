@@ -2,6 +2,7 @@ import { useMemo, type RefObject } from 'react';
 
 import type { ChangeUnitDetail, CodexLiveApproval, CodexSessionView } from '../../shared/api.ts';
 import { formatLongTimestamp } from '../lib/format.ts';
+import { orderSessions } from '../lib/sessionOrder.ts';
 import { CodexThreadViewer } from './CodexThreadViewer.tsx';
 
 type LiveSessionUpdates = {
@@ -14,9 +15,11 @@ type LiveSessionUpdates = {
 
 type SessionReplayPanelProps = {
   detail: ChangeUnitDetail;
+  panelId?: string;
   preferredSessionId?: string | null;
   liveSessionUpdates: LiveSessionUpdates;
   focusRef?: RefObject<HTMLElement | null>;
+  replayFocused?: boolean;
   onSelectSession: (sessionId: string) => void;
   onRespondApproval: (
     threadId: string,
@@ -26,23 +29,6 @@ type SessionReplayPanelProps = {
   respondingApprovalIds: number[];
   approvalErrorMessage: string | null;
 };
-
-function roleWeight(role: string): number {
-  switch (role) {
-    case 'planner':
-      return 0;
-    case 'implementer':
-      return 1;
-    case 'reviewer_a':
-      return 2;
-    case 'reviewer_b':
-      return 3;
-    case 'live_session':
-      return 4;
-    default:
-      return 9;
-  }
-}
 
 function humanizeToken(value: string): string {
   return value.replaceAll('_', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
@@ -76,18 +62,17 @@ function getApprovalStatusCopy(approval: CodexLiveApproval) {
 
 export function SessionReplayPanel({
   detail,
+  panelId,
   preferredSessionId,
   liveSessionUpdates,
   focusRef,
+  replayFocused = false,
   onSelectSession,
   onRespondApproval,
   respondingApprovalIds,
   approvalErrorMessage,
 }: SessionReplayPanelProps) {
-  const sessions = useMemo(
-    () => [...detail.session_views].sort((a, b) => roleWeight(a.role) - roleWeight(b.role)),
-    [detail.session_views],
-  );
+  const sessions = useMemo(() => orderSessions(detail.session_views), [detail.session_views]);
   const activeSession =
     sessions.find((session) => session.id === preferredSessionId) ?? sessions[0] ?? null;
   const liveSession =
@@ -100,7 +85,11 @@ export function SessionReplayPanel({
       ref={focusRef}
       className="replay-panel"
       aria-label="Replay and live sessions"
+      data-replay-focus={replayFocused}
+      data-active-session-id={activeSession?.id ?? ''}
+      data-active-session-role={activeSession?.role ?? ''}
       tabIndex={-1}
+      id={panelId}
     >
       <header className="panel-header">
         <div>

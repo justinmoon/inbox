@@ -1,4 +1,12 @@
-import { startTransition, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  startTransition,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 
 import type { ChangeUnitDetail, ChangeUnitListItem } from '../shared/api.ts';
 import { ChangeUnitSurface } from './components/ChangeUnitSurface.tsx';
@@ -12,6 +20,7 @@ import {
   respondToLiveApproval,
 } from './lib/api.ts';
 import { getSidebarState } from './lib/format.ts';
+import { orderSessions } from './lib/sessionOrder.ts';
 
 type LiveSessionUpdates = {
   mode: 'idle' | 'events' | 'polling';
@@ -20,6 +29,31 @@ type LiveSessionUpdates = {
   lastEventAt: string | null;
   lastMethod: string | null;
 };
+
+const REPLAY_PANE_STORAGE_KEY = 'inbox.replayPaneWidth';
+const DEFAULT_REPLAY_PANE_WIDTH = 420;
+const MIN_REPLAY_PANE_WIDTH = 320;
+const FOCUS_MIN_REPLAY_PANE_WIDTH = 520;
+const REPLAY_PANE_STEP = 48;
+
+function clampReplayPaneWidth(width: number, replayFocused: boolean): number {
+  const minWidth = replayFocused ? FOCUS_MIN_REPLAY_PANE_WIDTH : MIN_REPLAY_PANE_WIDTH;
+  const viewportWidth = typeof window === 'undefined' ? 1440 : window.innerWidth;
+  const maxWidth = Math.max(minWidth, Math.min(960, Math.floor(viewportWidth * 0.72)));
+  return Math.min(Math.max(Math.round(width), minWidth), maxWidth);
+}
+
+function readReplayPaneWidth(): number {
+  if (typeof window === 'undefined') return DEFAULT_REPLAY_PANE_WIDTH;
+
+  const raw = window.localStorage.getItem(REPLAY_PANE_STORAGE_KEY);
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return clampReplayPaneWidth(DEFAULT_REPLAY_PANE_WIDTH, false);
+  }
+
+  return clampReplayPaneWidth(parsed, false);
+}
 
 function readSelectedChangeId(): string | null {
   return new URLSearchParams(window.location.search).get('change');
@@ -72,6 +106,8 @@ export function App() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [preferredSessionId, setPreferredSessionId] = useState<string | null>(null);
+  const [replayFocused, setReplayFocused] = useState(false);
+  const [replayPaneWidth, setReplayPaneWidth] = useState<number>(() => readReplayPaneWidth());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
   const [approvalErrorMessage, setApprovalErrorMessage] = useState<string | null>(null);
@@ -86,6 +122,9 @@ export function App() {
   const itemButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const mainReviewRef = useRef<HTMLElement | null>(null);
   const replayPanelRef = useRef<HTMLElement | null>(null);
+  const replayDragStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(
+    null,
+  );
 
   const mainQueueItems = useMemo(
     () => items.filter((item) => getSidebarState(item.status) !== 'landed'),
@@ -94,6 +133,25 @@ export function App() {
   const landedItems = useMemo(
     () => items.filter((item) => getSidebarState(item.status) === 'landed'),
     [items],
+  );
+  const currentDetail = useMemo(() => {
+    if (!detail || !selectedId) return null;
+    return detail.change_unit.id === selectedId ? detail : null;
+  }, [detail, selectedId]);
+  const orderedSessionIds = useMemo(
+    () => (currentDetail ? orderSessions(currentDetail.session_views).map((session) => session.id) : []),
+    [currentDetail],
+  );
+  const activeSessionId =
+    orderedSessionIds.find((sessionId) => sessionId === preferredSessionId) ??
+    orderedSessionIds[0] ??
+    null;
+  const appShellStyle = useMemo(
+    () =>
+      ({
+        ['--replay-pane-width' as '--replay-pane-width']: `${replayPaneWidth}px`,
+      }) as CSSProperties,
+    [replayPaneWidth],
   );
 
   useEffect(() => {
@@ -152,6 +210,49 @@ export function App() {
   }, [selectedId]);
 
   useEffect(() => {
+    window.localStorage.setItem(REPLAY_PANE_STORAGE_KEY, String(replayPaneWidth));
+  }, [replayPaneWidth]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setReplayPaneWidth((current) => clampReplayPaneWidth(current, replayFocused));
+    };
+
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [replayFocused]);
+
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      const dragState = replayDragStateRef.current;
+      if (!dragState) return;
+
+      setReplayPaneWidth(
+        clampReplayPaneWidth(dragState.startWidth + (dragState.startX - event.clientX), replayFocused),
+      );
+    };
+
+    const stopDragging = (event: PointerEvent) => {
+      const dragState = replayDragStateRef.current;
+      if (!dragState) return;
+      if (event.type !== 'pointercancel' && dragState.pointerId !== event.pointerId) return;
+
+      replayDragStateRef.current = null;
+      document.body.classList.remove('is-resizing-replay');
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopDragging);
+    window.addEventListener('pointercancel', stopDragging);
+
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stopDragging);
+      window.removeEventListener('pointercancel', stopDragging);
+    };
+  }, [replayFocused]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isTypingTarget(event.target) && event.key !== 'Escape') return;
 
@@ -182,12 +283,36 @@ export function App() {
           event.preventDefault();
           mainReviewRef.current?.focus();
           break;
+        case 'r':
+          event.preventDefault();
+          toggleReplayFocus();
+          break;
+        case '[':
+          event.preventDefault();
+          moveSessionSelection(-1);
+          break;
+        case ']':
+          event.preventDefault();
+          moveSessionSelection(1);
+          break;
+        case 'H':
+          if (event.shiftKey) {
+            event.preventDefault();
+            resizeReplayPane(-REPLAY_PANE_STEP);
+          }
+          break;
+        case 'L':
+          if (event.shiftKey) {
+            event.preventDefault();
+            resizeReplayPane(REPLAY_PANE_STEP);
+          }
+          break;
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [helpOpen, mainQueueItems, selectedId]);
+  }, [activeSessionId, helpOpen, mainQueueItems, orderedSessionIds, replayFocused, selectedId]);
 
   function selectChangeUnit(id: string, replace = false) {
     startTransition(() => {
@@ -203,6 +328,28 @@ export function App() {
     const startIndex = currentIndex >= 0 ? currentIndex : 0;
     const nextIndex = (startIndex + delta + mainQueueItems.length) % mainQueueItems.length;
     selectChangeUnit(mainQueueItems[nextIndex].id);
+  }
+
+  function moveSessionSelection(delta: 1 | -1) {
+    if (orderedSessionIds.length === 0) return;
+
+    const currentIndex = activeSessionId ? orderedSessionIds.indexOf(activeSessionId) : -1;
+    const startIndex = currentIndex >= 0 ? currentIndex : 0;
+    const nextIndex = (startIndex + delta + orderedSessionIds.length) % orderedSessionIds.length;
+    setPreferredSessionId(orderedSessionIds[nextIndex]);
+    replayPanelRef.current?.focus();
+  }
+
+  function resizeReplayPane(delta: number) {
+    setReplayPaneWidth((current) => clampReplayPaneWidth(current + delta, replayFocused));
+  }
+
+  function toggleReplayFocus() {
+    setReplayFocused((current) => {
+      const next = !current;
+      setReplayPaneWidth((width) => clampReplayPaneWidth(width, next));
+      return next;
+    });
   }
 
   async function refreshList() {
@@ -253,11 +400,6 @@ export function App() {
     }
   }
 
-  const currentDetail = useMemo(() => {
-    if (!detail || !selectedId) return null;
-    return detail.change_unit.id === selectedId ? detail : null;
-  }, [detail, selectedId]);
-
   useEffect(() => {
     if (!currentDetail) {
       setPreferredSessionId(null);
@@ -265,8 +407,7 @@ export function App() {
     }
 
     const availableSessionIds = new Set(currentDetail.session_views.map((session) => session.id));
-    const fallbackSessionId =
-      currentDetail.live_session_id ?? currentDetail.session_views[0]?.id ?? null;
+    const fallbackSessionId = currentDetail.live_session_id ?? orderedSessionIds[0] ?? null;
 
     setPreferredSessionId((current) => {
       if (current && availableSessionIds.has(current)) {
@@ -275,7 +416,12 @@ export function App() {
 
       return fallbackSessionId;
     });
-  }, [currentDetail?.change_unit.id, currentDetail?.live_session_id, currentDetail?.session_views]);
+  }, [
+    currentDetail?.change_unit.id,
+    currentDetail?.live_session_id,
+    currentDetail?.session_views,
+    orderedSessionIds,
+  ]);
 
   useEffect(() => {
     if (!currentDetail || currentDetail.execution_state.status !== 'launched') {
@@ -396,6 +542,19 @@ export function App() {
     replayPanelRef.current?.focus();
   }
 
+  function startReplayResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (window.innerWidth <= 980) return;
+
+    replayDragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: replayPaneWidth,
+    };
+    document.body.classList.add('is-resizing-replay');
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
   async function refreshCurrentDetail() {
     if (!selectedId) return;
     await refreshDetail(selectedId);
@@ -425,21 +584,28 @@ export function App() {
 
   return (
     <>
-      <div className="app-shell">
-        <InboxRail
-          items={mainQueueItems}
-          landedItems={landedItems}
-          selectedId={selectedId}
-          emptyMessage={errorMessage ?? emptyMessage}
-          onItemRef={(id, node) => {
-            if (node) {
-              itemButtonRefs.current.set(id, node);
-              return;
-            }
-            itemButtonRefs.current.delete(id);
-          }}
-          onSelect={(id) => selectChangeUnit(id)}
-        />
+      <div
+        className={`app-shell${replayFocused ? ' is-replay-focused' : ''}`}
+        data-replay-focus={replayFocused}
+        data-replay-pane-width={String(replayPaneWidth)}
+        style={appShellStyle}
+      >
+        <div className="queue-column" data-queue-collapsed={replayFocused}>
+          <InboxRail
+            items={mainQueueItems}
+            landedItems={landedItems}
+            selectedId={selectedId}
+            emptyMessage={errorMessage ?? emptyMessage}
+            onItemRef={(id, node) => {
+              if (node) {
+                itemButtonRefs.current.set(id, node);
+                return;
+              }
+              itemButtonRefs.current.delete(id);
+            }}
+            onSelect={(id) => selectChangeUnit(id)}
+          />
+        </div>
 
         <div className="main-column">
           {errorMessage ? (
@@ -478,6 +644,21 @@ export function App() {
           )}
         </div>
 
+        <div className="splitter-column">
+          <div
+            aria-controls="replay-panel"
+            aria-label="Resize replay pane"
+            aria-orientation="vertical"
+            aria-valuemax={Math.max(FOCUS_MIN_REPLAY_PANE_WIDTH, 960)}
+            aria-valuemin={MIN_REPLAY_PANE_WIDTH}
+            aria-valuenow={replayPaneWidth}
+            className="replay-splitter"
+            data-replay-splitter="true"
+            onPointerDown={startReplayResize}
+            role="separator"
+          />
+        </div>
+
         <div className="right-column">
           {loadingDetail && !currentDetail ? (
             <div className="empty-panel">
@@ -486,9 +667,11 @@ export function App() {
           ) : currentDetail ? (
             <SessionReplayPanel
               detail={currentDetail}
+              panelId="replay-panel"
               focusRef={replayPanelRef}
-              preferredSessionId={preferredSessionId}
+              preferredSessionId={activeSessionId}
               liveSessionUpdates={liveSessionUpdates}
+              replayFocused={replayFocused}
               onSelectSession={(sessionId) => setPreferredSessionId(sessionId)}
               onRespondApproval={handleApprovalResponse}
               respondingApprovalIds={respondingApprovalIds}

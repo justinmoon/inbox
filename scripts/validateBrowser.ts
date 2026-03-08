@@ -161,6 +161,187 @@ async function assertSelectedStep(title: string, index: number) {
   );
 }
 
+async function pressKey(key: string, options?: { shiftKey?: boolean }) {
+  await browserEval(
+    [
+      '(async () => {',
+      `  const key = ${JSON.stringify(key)};`,
+      `  const shiftKey = ${JSON.stringify(Boolean(options?.shiftKey))};`,
+      "  window.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey, bubbles: true }));",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 180));',
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertReplayWorkspaceControls() {
+  await browserEval(
+    [
+      '(async () => {',
+      "  const rightColumn = document.querySelector('.right-column');",
+      "  const shell = document.querySelector('.app-shell');",
+      "  if (!(rightColumn instanceof HTMLElement) || !(shell instanceof HTMLElement)) {",
+      "    throw new Error('Missing app shell or replay column for workspace validation.');",
+      '  }',
+      '  const initialWidth = Math.round(rightColumn.getBoundingClientRect().width);',
+      '  if (initialWidth < 280) throw new Error(`Replay pane is unexpectedly narrow: ${initialWidth}px.`);',
+      "  window.__inboxInitialReplayWidth = initialWidth;",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('L', { shiftKey: true });
+  await browserEval(
+    [
+      '(async () => {',
+      "  const rightColumn = document.querySelector('.right-column');",
+      "  const shell = document.querySelector('.app-shell');",
+      "  const initialWidth = Number(window.__inboxInitialReplayWidth ?? 0);",
+      "  if (!(rightColumn instanceof HTMLElement) || !(shell instanceof HTMLElement)) {",
+      "    throw new Error('Replay pane width controls are missing.');",
+      '  }',
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      '    const nextWidth = Math.round(rightColumn.getBoundingClientRect().width);',
+      "    const storedWidth = window.localStorage.getItem('inbox.replayPaneWidth');",
+      "    if (nextWidth > initialWidth && storedWidth === shell.getAttribute('data-replay-pane-width')) {",
+      '      window.__inboxGrownReplayWidth = nextWidth;',
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Replay pane did not grow after Shift+L.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('H', { shiftKey: true });
+  await browserEval(
+    [
+      '(async () => {',
+      "  const rightColumn = document.querySelector('.right-column');",
+      "  const shell = document.querySelector('.app-shell');",
+      "  const grownWidth = Number(window.__inboxGrownReplayWidth ?? 0);",
+      "  if (!(rightColumn instanceof HTMLElement) || !(shell instanceof HTMLElement)) {",
+      "    throw new Error('Replay pane width controls are missing after shrink.');",
+      '  }',
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      '    const nextWidth = Math.round(rightColumn.getBoundingClientRect().width);',
+      "    if (nextWidth < grownWidth && window.localStorage.getItem('inbox.replayPaneWidth') === shell.getAttribute('data-replay-pane-width')) {",
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Replay pane did not shrink after Shift+H.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey(']');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    const activeRole = document.querySelector('.replay-panel')?.getAttribute('data-active-session-role');",
+      "    if (activeRole === 'implementer') return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Next-session hotkey did not switch to the implementer session.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('[');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    const activeRole = document.querySelector('.replay-panel')?.getAttribute('data-active-session-role');",
+      "    if (activeRole === 'planner') return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Previous-session hotkey did not return to the planner session.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('r');
+  await browserEval(
+    [
+      '(async () => {',
+      "  const shell = document.querySelector('.app-shell');",
+      "  const rightColumn = document.querySelector('.right-column');",
+      "  const queueColumn = document.querySelector('.queue-column');",
+      "  if (!(shell instanceof HTMLElement) || !(rightColumn instanceof HTMLElement) || !(queueColumn instanceof HTMLElement)) {",
+      "    throw new Error('Replay focus mode elements are missing.');",
+      '  }',
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    const focused = shell.getAttribute('data-replay-focus');",
+      '    const replayWidth = Math.round(rightColumn.getBoundingClientRect().width);',
+      "    if (focused === 'true' && replayWidth >= 500 && queueColumn.getAttribute('data-queue-collapsed') === 'true') return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Replay focus mode did not take over the layout.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey(']');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    const activeRole = document.querySelector('.replay-panel')?.getAttribute('data-active-session-role');",
+      "    if (activeRole === 'implementer') return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Session hotkeys should still work in replay focus mode.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('r');
+  await browserEval(
+    [
+      '(async () => {',
+      "  const shell = document.querySelector('.app-shell');",
+      "  if (!(shell instanceof HTMLElement)) throw new Error('Missing app shell after exiting focus mode.');",
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    if (shell.getAttribute('data-replay-focus') === 'false') return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Replay focus mode did not exit cleanly.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertReplayWidthPersists(expectedChangeId: string) {
+  await runBrowser(['open', `${baseUrl}/?change=${expectedChangeId}`]);
+  await browserEval(
+    [
+      '(async () => {',
+      "  const shell = document.querySelector('.app-shell');",
+      "  if (!(shell instanceof HTMLElement)) throw new Error('Missing app shell after reload.');",
+      "  const storedWidth = window.localStorage.getItem('inbox.replayPaneWidth');",
+      "  if (!storedWidth) throw new Error('Expected stored replay width before reload.');",
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      "    if (shell.getAttribute('data-replay-pane-width') === storedWidth) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error(`Replay pane width did not persist after reload. Expected ${storedWidth}, saw ${shell.getAttribute('data-replay-pane-width')}.`);",
+      '})()',
+    ].join(' '),
+  );
+}
+
 async function assertExecutionLaunched() {
   await runBrowser(['wait', '--text', 'Next chunk started']);
   await browserEval(
@@ -425,6 +606,7 @@ try {
 
   await runBrowser(['open', baseUrl]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertReplayWorkspaceControls();
   await assertCodexReplayKinds('planner', ['agentMessage']);
   await assertCodexReplayKinds('implementer', ['reasoning', 'commandExecution', 'fileChange']);
   await assertCodexReplayKinds('reviewer_a', ['agentMessage']);
@@ -448,6 +630,7 @@ try {
 
   await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertReplayWidthPersists('cu_validation_rollup_checkpoint');
   await assertCodexReplayKinds('implementer', ['reasoning', 'commandExecution', 'fileChange']);
   const canonicalSearch = readEvalString(await browserEval('window.location.search;', true));
   assertIncludes(
