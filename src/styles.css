@@ -1460,6 +1460,11 @@ body.is-resizing-replay {
   background: rgba(255, 252, 246, 0.95);
 }
 
+.codex-session-surface-wall .codex-thread-viewer {
+  overflow: visible;
+  padding-right: 0;
+}
+
 .replay-status-shell {
   background: rgba(252, 246, 236, 0.95);
 }
