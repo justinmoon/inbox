@@ -9,11 +9,12 @@
     "dev:web": "vite",
     "build": "npm run schema:write && vite build",
     "start": "cross-env INBOX_STATIC_DIR=dist tsx server/index.ts",
+    "test": "tsx --test server/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "schema:write": "tsx scripts/writeSchema.ts",
     "import": "tsx server/cli.ts import",
     "reseed": "tsx server/cli.ts reseed",
-    "validate": "npm run build && tsx scripts/validateBrowser.ts"
+    "validate": "npm run build && npm run test && tsx scripts/validateBrowser.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.6",

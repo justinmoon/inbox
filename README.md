@@ -81,7 +81,7 @@ Runtime state stays outside the bundle:
 
 - execute-next persists `idle` / `launching` / `launched` / `failed`
 - repositories and workspaces persist as generic runtime resources
-- local sources may be true git repos or plain committed directories that seed a hidden backing repo
+- the first provider currently requires a real git repo or worktree root source
 - the reviewed checkpoint packet stays immutable
 - linked checkpoint sessions are reconstructed from committed rollout history
 - launched thread metadata and live transcript are attached at read time from Codex app-server

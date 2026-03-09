@@ -200,6 +200,39 @@ function resolveActionPath(rawPath: string) {
   return path.isAbsolute(rawPath) ? rawPath : path.resolve(process.cwd(), rawPath);
 }
 
+function resolveWorkspaceCwd(args: {
+  action: ChangeUnitDetail['change_unit']['next_action'];
+  workspacePath: string | null;
+}) {
+  const { action, workspacePath } = args;
+  if (!workspacePath) {
+    return action?.cwd ? resolveActionPath(action.cwd) : null;
+  }
+
+  if (!action?.cwd) {
+    return workspacePath;
+  }
+
+  const requestedCwd = resolveActionPath(action.cwd);
+  const repoSource = action.workspace_request?.repo.source
+    ? resolveActionPath(action.workspace_request.repo.source)
+    : null;
+
+  if (!repoSource) {
+    return workspacePath;
+  }
+
+  const relativePath = path.relative(repoSource, requestedCwd);
+  if (
+    relativePath === '' ||
+    (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+  ) {
+    return path.join(workspacePath, relativePath);
+  }
+
+  return workspacePath;
+}
+
 function extractThreadId(result: unknown): string {
   if (!isObject(result) || !isObject(result.thread) || typeof result.thread.id !== 'string') {
     throw new Error('Codex app-server returned an invalid thread response.');
@@ -319,7 +352,10 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
     const turnResult = await appServer.request('turn/start', {
       threadId,
       input: [{ type: 'text', text: action.prompt, textElements: [] }],
-      cwd: launchedWorkspace?.path ?? (action.cwd ? resolveActionPath(action.cwd) : null),
+      cwd: resolveWorkspaceCwd({
+        action,
+        workspacePath: launchedWorkspace?.path ?? null,
+      }),
       approvalPolicy: config.approvalPolicy,
       sandboxPolicy: buildSandboxPolicy(),
       model: config.model,

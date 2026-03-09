@@ -658,7 +658,7 @@ async function assertWorkspaceSubsystem() {
     };
   }>('/api/repos/ensure', {
     id: 'validation-rollup-example',
-    source: 'seed/change-units/validation-rollup-checkpoint/example-project',
+    source: '.',
     metadata: { validation: 'true' },
   });
 
@@ -679,7 +679,6 @@ async function assertWorkspaceSubsystem() {
     workspace: { id: string; path: string; repo_id: string; strategy: string };
   }>('/api/workspaces', {
     repo_id: repo.id,
-    from: { kind: 'branch', branch: 'main' },
     name_hint: 'manual-peer',
     tags: ['validate'],
     metadata: { purpose: 'validation' },

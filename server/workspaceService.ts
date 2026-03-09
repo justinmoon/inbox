@@ -98,7 +98,7 @@ async function resolveWorkspaceHead(workspacePath: string) {
 async function resolveRevisionInRepository(repository: RepositoryRecord, revision: RevisionRef) {
   switch (revision.kind) {
     case 'branch':
-      return await git(['rev-parse', `${revision.branch}^{commit}`], repository.backing_store_path);
+      return await git(['rev-parse', `origin/${revision.branch}^{commit}`], repository.backing_store_path);
     case 'ref':
       return await git(['rev-parse', `${revision.ref}^{commit}`], repository.backing_store_path);
     case 'commit':
@@ -243,7 +243,7 @@ export class WorkspaceService {
       if (!sourceWorkspace) {
         throw new Error(`Workspace ${sourceRef.workspace_id} is not registered.`);
       }
-      resolvedRevision = sourceWorkspace.current_head ?? (await resolveWorkspaceHead(sourceWorkspace.path));
+      resolvedRevision = await resolveWorkspaceHead(sourceWorkspace.path);
     } else {
       resolvedRevision = await resolveRevisionInRepository(repository, sourceRef);
     }

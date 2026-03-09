@@ -109,11 +109,7 @@
         "strategy": "shared-store-worktree",
         "repo": {
           "id": "validation-rollup-example",
-          "source": "seed/change-units/validation-rollup-checkpoint/example-project"
-        },
-        "from": {
-          "kind": "branch",
-          "branch": "main"
+          "source": "."
         },
         "name_hint": "execute-next",
         "tags": [

@@ -101,39 +101,58 @@ async function resolveHeadCommit(cwd: string) {
   return await git(['rev-parse', 'HEAD'], cwd);
 }
 
-async function isGitRepository(source: string) {
+async function isGitRepositoryRoot(source: string) {
   const topLevel = (await tryGit(['rev-parse', '--show-toplevel'], source))?.trim();
   if (!topLevel) {
     return false;
   }
 
-  return path.resolve(topLevel) === path.resolve(source);
+  const [resolvedTopLevel, resolvedSource] = await Promise.all([
+    fs.realpath(topLevel).catch(() => path.resolve(topLevel)),
+    fs.realpath(source).catch(() => path.resolve(source)),
+  ]);
+
+  return resolvedTopLevel === resolvedSource;
 }
 
-async function seedBackingStoreFromDirectory(source: string, backingStorePath: string) {
-  await fs.mkdir(path.dirname(backingStorePath), { recursive: true });
-  await fs.cp(source, backingStorePath, { recursive: true });
-  await git(['init', '--initial-branch=main'], backingStorePath);
-  await git(['config', 'user.name', 'Inbox'], backingStorePath);
-  await git(['config', 'user.email', 'inbox@example.invalid'], backingStorePath);
-  await git(['add', '--all'], backingStorePath);
-  await git(['commit', '-m', 'Seed backing store'], backingStorePath);
+async function readBranchName(cwd: string) {
+  const branch = (await tryGit(['branch', '--show-current'], cwd))?.trim();
+  return branch && branch !== 'HEAD' ? branch : null;
+}
+
+async function readUpstreamRef(cwd: string) {
+  return (await tryGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], cwd))?.trim() ?? null;
+}
+
+async function isWorktreeDirty(cwd: string) {
+  const status = await git(['status', '--porcelain'], cwd);
+  return status.trim().length > 0;
+}
+
+function buildTrackedRef(branch: string) {
+  return `origin/${branch}`;
+}
+
+async function ensureCleanWorkspace(cwd: string, label: string) {
+  if (await isWorktreeDirty(cwd)) {
+    throw new Error(`${label} is dirty; refusing to resync it automatically.`);
+  }
 }
 
 async function detectDefaultRef(backingStorePath: string, source: string): Promise<RevisionRef> {
   const localSourcePath =
-    !isRemoteSource(source) && (await isGitRepository(resolveSourcePath(source)))
+    !isRemoteSource(source) && (await isGitRepositoryRoot(resolveSourcePath(source)))
       ? resolveSourcePath(source)
       : null;
   if (localSourcePath) {
-    const branch = (await tryGit(['branch', '--show-current'], localSourcePath))?.trim();
-    if (branch && branch !== 'HEAD') {
+    const branch = await readBranchName(localSourcePath);
+    if (branch) {
       return { kind: 'branch', branch };
     }
   }
 
-  const branch = (await tryGit(['branch', '--show-current'], backingStorePath))?.trim();
-  if (branch && branch !== 'HEAD') {
+  const branch = await readBranchName(backingStorePath);
+  if (branch) {
     return { kind: 'branch', branch };
   }
 
@@ -144,7 +163,7 @@ async function detectDefaultRef(backingStorePath: string, source: string): Promi
 function revisionToGitSpec(sourceRef: RevisionRef, fallbackCommit: string) {
   switch (sourceRef.kind) {
     case 'branch':
-      return sourceRef.branch;
+      return buildTrackedRef(sourceRef.branch);
     case 'ref':
       return sourceRef.ref;
     case 'commit':
@@ -152,6 +171,27 @@ function revisionToGitSpec(sourceRef: RevisionRef, fallbackCommit: string) {
     case 'workspace':
       return fallbackCommit;
   }
+}
+
+function commitLikeSpec(sourceRef: RevisionRef, fallbackCommit: string) {
+  switch (sourceRef.kind) {
+    case 'commit':
+      return sourceRef.commit;
+    case 'ref':
+      return sourceRef.ref;
+    case 'workspace':
+      return fallbackCommit;
+    case 'branch':
+      return buildTrackedRef(sourceRef.branch);
+  }
+}
+
+async function removeExistingWorktree(backingStorePath: string, worktreePath: string) {
+  if (!(await pathExists(path.join(worktreePath, '.git')))) {
+    return;
+  }
+
+  await git(['worktree', 'remove', '--force', worktreePath], backingStorePath);
 }
 
 export class SharedStoreWorktreeProvider {
@@ -165,6 +205,12 @@ export class SharedStoreWorktreeProvider {
 
   async ensureRepository(options: EnsureRepositoryOptions): Promise<EnsureRepositoryResult> {
     const source = resolveSourcePath(options.source);
+    if (!(await isGitRepositoryRoot(source))) {
+      throw new Error(
+        'shared-store-worktree currently requires a real git repo or worktree root source.',
+      );
+    }
+
     const repoId =
       options.id && slugify(options.id)
         ? slugify(options.id)
@@ -177,25 +223,39 @@ export class SharedStoreWorktreeProvider {
     await fs.mkdir(visibleRootPath, { recursive: true });
 
     if (!(await pathExists(path.join(backingStorePath, '.git')))) {
-      if (await isGitRepository(source)) {
-        await git(['clone', '--quiet', source, backingStorePath]);
-      } else {
-        await seedBackingStoreFromDirectory(source, backingStorePath);
-      }
+      await git(['clone', '--quiet', source, backingStorePath]);
     } else {
-      if (await isGitRepository(source)) {
-        await git(['fetch', '--all', '--prune'], backingStorePath);
-      }
+      await git(['fetch', '--all', '--prune'], backingStorePath);
     }
 
     const defaultRef = await detectDefaultRef(backingStorePath, source);
+    const trunkBranchName = 'trunk';
+    const targetSpec =
+      defaultRef.kind === 'branch'
+        ? buildTrackedRef(defaultRef.branch)
+        : commitLikeSpec(defaultRef, await resolveHeadCommit(backingStorePath));
 
     if (!(await pathExists(path.join(visibleTrunkPath, '.git')))) {
-      const targetSpec =
-        defaultRef.kind === 'commit'
-          ? defaultRef.commit
-          : revisionToGitSpec(defaultRef, await resolveHeadCommit(backingStorePath));
-      await git(['worktree', 'add', '--detach', visibleTrunkPath, targetSpec], backingStorePath);
+      await git(['worktree', 'add', '-B', trunkBranchName, visibleTrunkPath, targetSpec], backingStorePath);
+    } else if (defaultRef.kind === 'branch') {
+      await ensureCleanWorkspace(visibleTrunkPath, 'Visible trunk workspace');
+      await git(['checkout', trunkBranchName], visibleTrunkPath);
+      await git(['branch', '--set-upstream-to', buildTrackedRef(defaultRef.branch), trunkBranchName], visibleTrunkPath);
+      await git(['reset', '--hard', buildTrackedRef(defaultRef.branch)], visibleTrunkPath);
+    } else {
+      await ensureCleanWorkspace(visibleTrunkPath, 'Visible trunk workspace');
+      await git(['checkout', trunkBranchName], visibleTrunkPath);
+      await git(['reset', '--hard', targetSpec], visibleTrunkPath);
+    }
+
+    if (defaultRef.kind === 'branch') {
+      const upstream = await readUpstreamRef(visibleTrunkPath);
+      if (upstream !== buildTrackedRef(defaultRef.branch)) {
+        await git(
+          ['branch', '--set-upstream-to', buildTrackedRef(defaultRef.branch), trunkBranchName],
+          visibleTrunkPath,
+        );
+      }
     }
 
     const now = timestamp();
@@ -228,7 +288,11 @@ export class SharedStoreWorktreeProvider {
       tags: ['trunk', ...(options.tags ?? [])],
       metadata: {
         ...(options.metadata ?? {}),
-        visible_role: 'trunk',
+        git_branch: trunkBranchName,
+        tracked_ref:
+          defaultRef.kind === 'branch'
+            ? buildTrackedRef(defaultRef.branch)
+            : commitLikeSpec(defaultRef, targetSpec),
       },
     };
 
@@ -237,18 +301,26 @@ export class SharedStoreWorktreeProvider {
 
   async createWorkspace(options: CreateWorkspaceOptions): Promise<WorkspaceRecord> {
     const now = timestamp();
-    const headCommit = await resolveHeadCommit(options.repository.visible_trunk_path);
-    const targetSpec = revisionToGitSpec(options.sourceRef, options.resolvedRevision || headCommit);
     const baseName = slugify(options.nameHint ?? 'workspace') || 'workspace';
     const suffix = now.replace(/[-:.TZ]/g, '').slice(0, 14);
     const workspaceName = `${baseName}-${suffix}`;
     const workspaceId = `${options.repository.id}--${workspaceName}`;
     const workspacePath = path.join(options.repository.visible_root_path, workspaceName);
+    const branchName = `ws-${workspaceName}`;
+    const targetSpec =
+      options.sourceRef.kind === 'branch'
+        ? buildTrackedRef(options.sourceRef.branch)
+        : commitLikeSpec(options.sourceRef, options.resolvedRevision);
 
-    await git(
-      ['worktree', 'add', '--detach', workspacePath, options.resolvedRevision || targetSpec],
-      options.repository.backing_store_path,
-    );
+    await removeExistingWorktree(options.repository.backing_store_path, workspacePath);
+    await git(['worktree', 'add', '-b', branchName, workspacePath, targetSpec], options.repository.backing_store_path);
+
+    if (options.sourceRef.kind === 'branch') {
+      await git(
+        ['branch', '--set-upstream-to', buildTrackedRef(options.sourceRef.branch), branchName],
+        workspacePath,
+      );
+    }
 
     return {
       id: workspaceId,
@@ -262,7 +334,13 @@ export class SharedStoreWorktreeProvider {
       created_at: now,
       updated_at: now,
       tags: options.tags ?? [],
-      metadata: options.metadata ?? {},
+      metadata: {
+        ...(options.metadata ?? {}),
+        git_branch: branchName,
+        ...(options.sourceRef.kind === 'branch'
+          ? { tracked_ref: buildTrackedRef(options.sourceRef.branch) }
+          : {}),
+      },
     };
   }
 }
