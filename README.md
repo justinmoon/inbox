@@ -14,6 +14,7 @@ The product is intentionally narrow:
 - one reading-first review surface
 - one Codex-native replay surface
 - one structured tutorial
+- one generic repo/workspace subsystem with visible peer workspaces
 - one persisted `Execute Next Prompt` state model
 - one real launched-session surface tied to the reviewed checkpoint
 - inline live-session approvals for command and file-change requests
@@ -74,14 +75,17 @@ The bundle now uses:
 - one canonical `change_unit`
 - structured tutorial data with `executive_summary` and tutorial `steps`
 - real linked sessions, rollout captures, and review verdicts
-- a narrow executable `next_action`
+- a narrow executable `next_action`, optionally with a generic `workspace_request`
 
 Runtime state stays outside the bundle:
 
 - execute-next persists `idle` / `launching` / `launched` / `failed`
+- repositories and workspaces persist as generic runtime resources
+- local sources may be true git repos or plain committed directories that seed a hidden backing repo
 - the reviewed checkpoint packet stays immutable
 - linked checkpoint sessions are reconstructed from committed rollout history
 - launched thread metadata and live transcript are attached at read time from Codex app-server
+- execute-next can ensure a repo, create a fresh peer workspace, and launch Codex in that workspace
 - the right rail auto-updates launched live sessions from app-server notifications with polling fallback
 - pending live approvals are surfaced inline and answered through the app-server response path
 
@@ -94,6 +98,11 @@ Seed bundles live under [`seed/change-units`](./seed/change-units).
 
 Imported bundles are copied into `data/imported-change-units/` and override seeded bundles with
 the same `change_unit.id`.
+
+Runtime repositories and visible peer workspaces are persisted under `data/runtime/`:
+
+- hidden backing repos: `data/runtime/repositories/<repo-id>/store`
+- visible peer workspaces: `data/runtime/workspaces/<repo-id>/<workspace-name>`
 
 [`data/README.md`](./data/README.md) explains the ignored stale debris from earlier prototype
 paths. The current product does not use the old generated change-unit or SQLite files there.
@@ -111,8 +120,9 @@ paths. The current product does not use the old generated change-unit or SQLite 
 7. verifies captured file changes render as readable patch history instead of escaped JSON
 8. verifies the launched live session visibly auto-updates in place
 9. verifies inline live approvals render and accept/decline through the backend response path
-10. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
-11. verifies failed execute-next state renders a real retryable error
+10. verifies repo/workspace registration, peer workspace creation, and launched workspace metadata
+11. imports a dynamic-step fixture and verifies tutorial navigation from actual step data
+12. verifies failed execute-next state renders a real retryable error
 
 ## Notes
 

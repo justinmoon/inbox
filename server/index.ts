@@ -6,9 +6,14 @@ import express from 'express';
 import type {
   ChangeUnitDetail,
   ChangeUnitExecutionLaunched,
+  CreateWorkspaceRequest,
+  EnsureRepositoryRequest,
   ExecuteNextActionResult,
+  ListRepositoriesResponse,
+  ListWorkspacesResponse,
   RespondApprovalResult,
 } from '../shared/api.ts';
+import { revisionRefSchema } from '../shared/workspaces.ts';
 import { getChangeUnitDetail, listChangeUnits } from './changeUnits.ts';
 import { AppServerProcess } from './appServerProcess.ts';
 import { readConfig } from './config.ts';
@@ -21,10 +26,12 @@ import {
   persistImportedBundle,
 } from './importBundles.ts';
 import { LiveApprovalStore } from './liveApprovalStore.ts';
+import { WorkspaceService } from './workspaceService.ts';
 
 const config = readConfig(process.env);
 const appServer = new AppServerProcess({ codexBin: config.codexBin });
 const executionStateStore = new ExecutionStateStore(config.runtimeRoot);
+const workspaceService = new WorkspaceService(config.runtimeRoot);
 const liveSessionSubscribers = new Map<string, Set<express.Response>>();
 const liveApprovalStore = new LiveApprovalStore();
 
@@ -72,6 +79,20 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+}
+
+function readStringMap(value: unknown): Record<string, string> {
+  if (!isObject(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
 }
 
 function buildSandboxPolicy() {
@@ -261,8 +282,22 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
 
   let threadId = '';
   let threadSource: ExecuteNextActionResult['thread_source'] = 'resumed';
+  let launchedWorkspace: ChangeUnitExecutionLaunched['workspace'] = null;
 
   try {
+    if (action.workspace_request) {
+      const workspaceResult = await workspaceService.resolveWorkspaceRequest({
+        ...action.workspace_request,
+        tags: [...(action.workspace_request.tags ?? []), 'execute-next'],
+        metadata: {
+          ...action.workspace_request.metadata,
+          change_unit_id: detail.change_unit.id,
+          action_kind: action.kind,
+        },
+      });
+      launchedWorkspace = workspaceResult.workspace;
+    }
+
     if (action.kind === 'codex_fork_path') {
       const forkResult = await appServer.request('thread/fork', {
         threadId: '',
@@ -284,7 +319,7 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
     const turnResult = await appServer.request('turn/start', {
       threadId,
       input: [{ type: 'text', text: action.prompt, textElements: [] }],
-      cwd: action.cwd ? resolveActionPath(action.cwd) : null,
+      cwd: launchedWorkspace?.path ?? (action.cwd ? resolveActionPath(action.cwd) : null),
       approvalPolicy: config.approvalPolicy,
       sandboxPolicy: buildSandboxPolicy(),
       model: config.model,
@@ -297,10 +332,15 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
       action_label: actionLabel,
       thread_source: threadSource,
       started_at: startedAt,
+      workspace: launchedWorkspace,
       message:
         threadSource === 'forked'
-          ? 'Started a forked Codex thread for the next chunk.'
-          : 'Resumed the configured Codex thread for the next chunk.',
+          ? launchedWorkspace
+            ? `Started a forked Codex thread in workspace ${launchedWorkspace.path}.`
+            : 'Started a forked Codex thread for the next chunk.'
+          : launchedWorkspace
+            ? `Resumed the configured Codex thread in workspace ${launchedWorkspace.path}.`
+            : 'Resumed the configured Codex thread for the next chunk.',
     };
     await executionStateStore.write(detailId, launchedState);
     return launchedState;
@@ -315,6 +355,26 @@ async function executeNext(detailId: string): Promise<ExecuteNextActionResult> {
     });
     throw error;
   }
+}
+
+async function listRepositories(): Promise<ListRepositoriesResponse> {
+  return {
+    repositories: await workspaceService.listRepositories(),
+  };
+}
+
+async function listWorkspaces(): Promise<ListWorkspacesResponse> {
+  return {
+    workspaces: await workspaceService.listWorkspaces(),
+  };
+}
+
+async function ensureRepository(request: EnsureRepositoryRequest) {
+  return await workspaceService.ensureRepository(request);
+}
+
+async function createWorkspace(request: CreateWorkspaceRequest) {
+  return await workspaceService.createWorkspace(request);
 }
 
 async function respondToApproval(args: {
@@ -396,6 +456,101 @@ app.post('/api/import-bundle', async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to import bundle.';
     res.status(400).json({ error: 'import_failed', message });
+  }
+});
+
+app.get('/api/repos', async (_req, res) => {
+  try {
+    res.json(await listRepositories());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to list repositories.';
+    res.status(500).json({ error: 'repository_list_failed', message });
+  }
+});
+
+app.post('/api/repos/ensure', async (req, res) => {
+  const source = readString(req.body?.source);
+  if (!source) {
+    res.status(400).json({ error: 'invalid_source', message: 'Repository source is required.' });
+    return;
+  }
+
+  try {
+    const result = await ensureRepository({
+      provider: req.body?.provider === 'shared-store-worktree' ? req.body.provider : undefined,
+      id: readString(req.body?.id) ?? undefined,
+      source,
+      tags: readStringArray(req.body?.tags),
+      metadata: readStringMap(req.body?.metadata),
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to ensure repository.';
+    res.status(400).json({ error: 'repository_ensure_failed', message });
+  }
+});
+
+app.get('/api/workspaces', async (_req, res) => {
+  try {
+    res.json(await listWorkspaces());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to list workspaces.';
+    res.status(500).json({ error: 'workspace_list_failed', message });
+  }
+});
+
+app.post('/api/workspaces', async (req, res) => {
+  const provider = req.body?.provider === 'shared-store-worktree' ? req.body.provider : undefined;
+  const nameHint = readString(req.body?.name_hint) ?? undefined;
+  const tags = readStringArray(req.body?.tags);
+  const metadata = readStringMap(req.body?.metadata);
+
+  if (readString(req.body?.source_workspace_id)) {
+    try {
+      const result = await createWorkspace({
+        provider,
+        source_workspace_id: readString(req.body?.source_workspace_id)!,
+        name_hint: nameHint,
+        tags,
+        metadata,
+      });
+      res.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create workspace.';
+      res.status(400).json({ error: 'workspace_create_failed', message });
+    }
+    return;
+  }
+
+  const repoId = readString(req.body?.repo_id);
+  if (!repoId) {
+    res.status(400).json({
+      error: 'invalid_workspace_source',
+      message: 'Workspace creation requires repo_id or source_workspace_id.',
+    });
+    return;
+  }
+
+  const fromInput = req.body?.from;
+  const parsedFrom = fromInput ? revisionRefSchema.safeParse(fromInput) : null;
+  if (parsedFrom && !parsedFrom.success) {
+    res.status(400).json({ error: 'invalid_revision', message: 'Workspace revision is invalid.' });
+    return;
+  }
+
+  try {
+    const result = await createWorkspace({
+      provider,
+      repo_id: repoId,
+      from: parsedFrom?.success ? parsedFrom.data : undefined,
+      name_hint: nameHint,
+      tags,
+      metadata,
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to create workspace.';
+    res.status(400).json({ error: 'workspace_create_failed', message });
   }
 });
 

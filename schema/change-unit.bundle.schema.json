@@ -173,6 +173,145 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "workspace_request": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "default": "shared-store-worktree",
+                      "type": "string",
+                      "enum": [
+                        "shared-store-worktree"
+                      ]
+                    },
+                    "strategy": {
+                      "default": "shared-store-worktree",
+                      "type": "string",
+                      "enum": [
+                        "shared-store-worktree"
+                      ]
+                    },
+                    "repo": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "from": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "branch"
+                            },
+                            "branch": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "branch"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "ref"
+                            },
+                            "ref": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "ref"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "commit"
+                            },
+                            "commit": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "commit"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "workspace"
+                            },
+                            "workspace_id": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "workspace_id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "name_hint": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "tags": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "metadata": {
+                      "default": {},
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "strategy",
+                    "repo",
+                    "tags",
+                    "metadata"
+                  ],
+                  "additionalProperties": false
+                },
                 "label": {
                   "type": "string",
                   "minLength": 1
@@ -207,6 +346,145 @@
                 "cwd": {
                   "type": "string",
                   "minLength": 1
+                },
+                "workspace_request": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "default": "shared-store-worktree",
+                      "type": "string",
+                      "enum": [
+                        "shared-store-worktree"
+                      ]
+                    },
+                    "strategy": {
+                      "default": "shared-store-worktree",
+                      "type": "string",
+                      "enum": [
+                        "shared-store-worktree"
+                      ]
+                    },
+                    "repo": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "from": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "branch"
+                            },
+                            "branch": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "branch"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "ref"
+                            },
+                            "ref": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "ref"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "commit"
+                            },
+                            "commit": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "commit"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "workspace"
+                            },
+                            "workspace_id": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "workspace_id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "name_hint": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "tags": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "metadata": {
+                      "default": {},
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "strategy",
+                    "repo",
+                    "tags",
+                    "metadata"
+                  ],
+                  "additionalProperties": false
                 },
                 "label": {
                   "type": "string",

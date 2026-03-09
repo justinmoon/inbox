@@ -1,4 +1,11 @@
 import type { ChangeUnitBundle } from './changeUnitBundle.ts';
+import type {
+  RepositoryLocator,
+  RepositoryRecord,
+  RevisionRef,
+  WorkspaceProviderKind,
+  WorkspaceRecord,
+} from './workspaces.ts';
 
 export type ChangeUnitListItem = {
   id: string;
@@ -198,6 +205,8 @@ export type CodexSessionView = {
     started_at: string;
     thread_source: 'forked' | 'resumed';
     turn_id?: string | null;
+    workspace_path?: string | null;
+    workspace_strategy?: string | null;
   } | null;
   thread: CodexThread | null;
   load_error: string | null;
@@ -222,6 +231,7 @@ export type ChangeUnitExecutionLaunched = {
   thread_id: string;
   turn_id: string;
   thread_source: 'forked' | 'resumed';
+  workspace?: WorkspaceRecord | null;
   message?: string | null;
 };
 
@@ -254,4 +264,58 @@ export type ExecuteNextActionResult = ChangeUnitExecutionLaunched;
 
 export type RespondApprovalResult = {
   approval: CodexLiveApproval;
+};
+
+export type ListRepositoriesResponse = {
+  repositories: RepositoryRecord[];
+};
+
+export type ListWorkspacesResponse = {
+  workspaces: WorkspaceRecord[];
+};
+
+export type EnsureRepositoryRequest = {
+  provider?: WorkspaceProviderKind;
+  id?: string;
+  source: string;
+  tags?: string[];
+  metadata?: Record<string, string>;
+};
+
+export type EnsureRepositoryResult = {
+  repository: RepositoryRecord;
+  trunk_workspace: WorkspaceRecord;
+};
+
+export type CreateWorkspaceRequest =
+  | {
+      provider?: WorkspaceProviderKind;
+      repo_id: string;
+      from?: RevisionRef;
+      name_hint?: string;
+      tags?: string[];
+      metadata?: Record<string, string>;
+    }
+  | {
+      provider?: WorkspaceProviderKind;
+      source_workspace_id: string;
+      name_hint?: string;
+      tags?: string[];
+      metadata?: Record<string, string>;
+    };
+
+export type CreateWorkspaceResult = {
+  repository: RepositoryRecord;
+  workspace: WorkspaceRecord;
+};
+
+export type ResolveWorkspaceRequest = {
+  workspace_request: {
+    provider?: WorkspaceProviderKind;
+    repo: RepositoryLocator;
+    from?: RevisionRef;
+    name_hint?: string;
+    tags?: string[];
+    metadata?: Record<string, string>;
+  };
 };

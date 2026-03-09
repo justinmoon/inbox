@@ -116,6 +116,20 @@ export function CodexSessionSurface({
                 <code>{session.launched_from.turn_id ?? 'pending'}</code>
               </dd>
             </div>
+            {session.launched_from.workspace_path ? (
+              <div>
+                <dt>Workspace</dt>
+                <dd>
+                  <code>{session.launched_from.workspace_path}</code>
+                </dd>
+              </div>
+            ) : null}
+            {session.launched_from.workspace_strategy ? (
+              <div>
+                <dt>Strategy</dt>
+                <dd>{session.launched_from.workspace_strategy}</dd>
+              </div>
+            ) : null}
             {liveSession?.lastMethod ? (
               <div>
                 <dt>Latest event</dt>

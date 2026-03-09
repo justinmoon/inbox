@@ -55,6 +55,7 @@ export function ChangeUnitSurface({
     detail.execution_state.status === 'failed'
       ? detail.execution_state.error_message
       : localExecuteError;
+  const workspaceRequest = changeUnit.next_action?.workspace_request;
 
   async function handleExecuteNext() {
     if (!changeUnit.next_action || effectiveExecutionStatus === 'launching') return;
@@ -286,6 +287,37 @@ export function ChangeUnitSurface({
                   : 'This packet does not need you yet. The prepared follow-up stays here as supporting context until the unit moves back into attention.'}
         </p>
 
+        {workspaceRequest ? (
+          <dl className="execution-metadata execution-metadata-planned">
+            <div>
+              <dt>Workspace strategy</dt>
+              <dd>{workspaceRequest.strategy}</dd>
+            </div>
+            <div>
+              <dt>Workspace source</dt>
+              <dd>
+                <code>{workspaceRequest.repo.id ?? workspaceRequest.repo.source ?? 'repo'}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Base</dt>
+              <dd>
+                <code>
+                  {workspaceRequest.from
+                    ? workspaceRequest.from.kind === 'branch'
+                      ? workspaceRequest.from.branch
+                      : workspaceRequest.from.kind === 'ref'
+                        ? workspaceRequest.from.ref
+                        : workspaceRequest.from.kind === 'commit'
+                          ? workspaceRequest.from.commit
+                          : workspaceRequest.from.workspace_id
+                    : 'default trunk'}
+                </code>
+              </dd>
+            </div>
+          </dl>
+        ) : null}
+
         {detail.execution_state.status === 'launched' ? (
           <div className="execution-record" data-execution-result="true">
             <p className="execution-note">
@@ -312,6 +344,20 @@ export function ChangeUnitSurface({
                 <dt>Source</dt>
                 <dd>{detail.execution_state.thread_source}</dd>
               </div>
+              {detail.execution_state.workspace ? (
+                <>
+                  <div>
+                    <dt>Workspace</dt>
+                    <dd>
+                      <code>{detail.execution_state.workspace.path}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Strategy</dt>
+                    <dd>{detail.execution_state.workspace.strategy}</dd>
+                  </div>
+                </>
+              ) : null}
             </dl>
           </div>
         ) : null}

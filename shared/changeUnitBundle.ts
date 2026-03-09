@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { workspaceRequestSchema } from './workspaces.ts';
+
 export const changeUnitStatuses = [
   'in_progress',
   'awaiting_review',
@@ -115,6 +117,7 @@ const nextActionSchema = z.discriminatedUnion('kind', [
     path: z.string().min(1),
     prompt: z.string().min(1),
     cwd: z.string().min(1).optional(),
+    workspace_request: workspaceRequestSchema.optional(),
     label: z.string().min(1).optional(),
     role: z.string().min(1).optional(),
   }),
@@ -123,6 +126,7 @@ const nextActionSchema = z.discriminatedUnion('kind', [
     thread_id: z.string().min(1),
     prompt: z.string().min(1),
     cwd: z.string().min(1).optional(),
+    workspace_request: workspaceRequestSchema.optional(),
     label: z.string().min(1).optional(),
     role: z.string().min(1).optional(),
   }),

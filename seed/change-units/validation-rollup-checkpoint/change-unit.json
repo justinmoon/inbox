@@ -104,6 +104,27 @@
       "kind": "codex_fork_path",
       "path": "seed/change-units/validation-rollup-checkpoint/rollouts/implementer.jsonl",
       "cwd": "seed/change-units/validation-rollup-checkpoint/example-project",
+      "workspace_request": {
+        "provider": "shared-store-worktree",
+        "strategy": "shared-store-worktree",
+        "repo": {
+          "id": "validation-rollup-example",
+          "source": "seed/change-units/validation-rollup-checkpoint/example-project"
+        },
+        "from": {
+          "kind": "branch",
+          "branch": "main"
+        },
+        "name_hint": "execute-next",
+        "tags": [
+          "canonical-checkpoint",
+          "implementer"
+        ],
+        "metadata": {
+          "project_id": "proj_validation_rollup_checkpoint",
+          "change_unit_id": "cu_validation_rollup_checkpoint"
+        }
+      },
       "prompt": "Follow up by fixing the sparse-array regression in `formatValidationChecks`, add regression coverage for sparse input plus a deterministic state-order test, and rename the main formatting test so it matches the new summary-plus-details output.",
       "label": "Execute Next Prompt",
       "role": "implementer"

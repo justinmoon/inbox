@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import type { ChangeUnitExecutionState } from '../shared/api.ts';
+import { workspaceSchema } from '../shared/workspaces.ts';
 
 const EXECUTION_STATE_FILE = 'change-unit-executions.json';
 
@@ -46,6 +47,7 @@ function parseExecutionState(input: unknown): ChangeUnitExecutionState | null {
         thread_id: input.thread_id,
         turn_id: input.turn_id,
         thread_source: input.thread_source,
+        workspace: input.workspace ? workspaceSchema.parse(input.workspace) : null,
         message: typeof input.message === 'string' ? input.message : null,
       };
     case 'failed':

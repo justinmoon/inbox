@@ -111,6 +111,15 @@ async function postJson<T>(pathname: string, body?: unknown): Promise<T> {
   return payload as T;
 }
 
+async function getJson<T>(pathname: string): Promise<T> {
+  const response = await fetch(`${baseUrl}${pathname}`);
+  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!response.ok) {
+    throw new Error(String(payload?.message ?? `Request failed with ${response.status}`));
+  }
+  return payload as T;
+}
+
 async function assertSurfaceLoaded(expectedTitle: string, expectedStepTitles: string[]) {
   await runBrowser(['wait', '--text', expectedTitle]);
 
@@ -436,8 +445,13 @@ async function assertExecutionLaunched() {
       "if (!actionState) throw new Error('Expected launched execution state.');",
       "const openButton = document.querySelector('[data-open-live-session=\"true\"]');",
       "if (!(openButton instanceof HTMLElement)) throw new Error('Open Live Session CTA is missing.');",
-      "const threadCode = document.querySelector('.execution-metadata code')?.textContent?.trim();",
-      "if (!threadCode) throw new Error('Expected launched thread id in the action area.');",
+      "const executionCodes = [...document.querySelectorAll('.execution-record .execution-metadata code')].map((node) => node.textContent?.trim() ?? '');",
+      "if (!executionCodes[0]) throw new Error('Expected launched thread id in the action area.');",
+      "if (!executionCodes.some((value) => value.includes('/workspaces/'))) {",
+      "  throw new Error('Expected launched workspace path in the action area.');",
+      '}',
+      "const strategyText = document.querySelector('.execution-record')?.textContent ?? '';",
+      "if (!strategyText.includes('shared-store-worktree')) throw new Error('Expected launched workspace strategy in the action area.');",
       "openButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));",
     ].join(' '),
   );
@@ -453,6 +467,9 @@ async function assertExecutionLaunched() {
       "const liveMetadata = [...document.querySelectorAll('.live-session-metadata code')].map((node) => node.textContent?.trim() ?? '');",
       "if (liveMetadata.length < 1 || !liveMetadata[0]) {",
       "  throw new Error('Expected launched turn metadata in the live session panel.');",
+      '}',
+      "if (!liveMetadata.some((value) => value.includes('/workspaces/'))) {",
+      "  throw new Error('Expected launched workspace metadata in the live session panel.');",
       '}',
       "if (!document.querySelector('[data-thread-viewer-model=\"codex-native\"]')) throw new Error('Expected the live session to render through the Codex-native thread viewer.');",
       '  const deadline = Date.now() + 10000;',
@@ -624,6 +641,102 @@ async function assertCodexReplayKinds(role: string, expectedKinds: string[]) {
   );
 }
 
+async function assertWorkspaceSubsystem() {
+  const ensured = await postJson<{
+    repository: {
+      id: string;
+      source: string;
+      backing_store_path: string;
+      visible_root_path: string;
+      visible_trunk_path: string;
+      trunk_workspace_id: string;
+    };
+    trunk_workspace: {
+      id: string;
+      path: string;
+      strategy: string;
+    };
+  }>('/api/repos/ensure', {
+    id: 'validation-rollup-example',
+    source: 'seed/change-units/validation-rollup-checkpoint/example-project',
+    metadata: { validation: 'true' },
+  });
+
+  const repo = ensured.repository;
+  const trunkWorkspace = ensured.trunk_workspace;
+  if (!repo.visible_trunk_path.includes('/workspaces/')) {
+    throw new Error(`Expected visible trunk workspace path under /workspaces/, saw ${repo.visible_trunk_path}.`);
+  }
+  if (repo.visible_trunk_path.startsWith(repo.backing_store_path)) {
+    throw new Error('Visible trunk workspace should not live inside the hidden backing store.');
+  }
+  if (trunkWorkspace.path !== repo.visible_trunk_path) {
+    throw new Error('Trunk workspace path should match the repository visible trunk path.');
+  }
+
+  const created = await postJson<{
+    repository: { id: string; backing_store_path: string };
+    workspace: { id: string; path: string; repo_id: string; strategy: string };
+  }>('/api/workspaces', {
+    repo_id: repo.id,
+    from: { kind: 'branch', branch: 'main' },
+    name_hint: 'manual-peer',
+    tags: ['validate'],
+    metadata: { purpose: 'validation' },
+  });
+
+  if (created.workspace.repo_id !== repo.id) {
+    throw new Error('Created workspace should belong to the ensured repository.');
+  }
+  if (created.workspace.strategy !== 'shared-store-worktree') {
+    throw new Error(`Expected shared-store-worktree workspace strategy, saw ${created.workspace.strategy}.`);
+  }
+  if (path.dirname(created.workspace.path) !== path.dirname(repo.visible_trunk_path)) {
+    throw new Error('Created workspace should be a visible peer of the trunk workspace.');
+  }
+  if (created.workspace.path.startsWith(repo.backing_store_path)) {
+    throw new Error('Created workspace should not be nested inside the hidden backing store.');
+  }
+
+  const repositories = await getJson<{ repositories: Array<{ id: string }> }>('/api/repos');
+  if (!repositories.repositories.some((repository) => repository.id === repo.id)) {
+    throw new Error('Expected ensured repository to persist in the repository list.');
+  }
+
+  const workspaces = await getJson<{ workspaces: Array<{ id: string; path: string }> }>('/api/workspaces');
+  if (!workspaces.workspaces.some((workspace) => workspace.id === trunkWorkspace.id)) {
+    throw new Error('Expected trunk workspace to persist in the workspace list.');
+  }
+  if (!workspaces.workspaces.some((workspace) => workspace.id === created.workspace.id)) {
+    throw new Error('Expected created peer workspace to persist in the workspace list.');
+  }
+}
+
+async function assertExecutionWorkspacePersistence() {
+  const detail = await getJson<{
+    detail: {
+      execution_state: {
+        status: string;
+        workspace?: { path: string; strategy: string } | null;
+      };
+    };
+  }>('/api/change-units/cu_validation_rollup_checkpoint');
+
+  const execution = detail.detail.execution_state;
+  if (execution.status !== 'launched') {
+    throw new Error(`Expected canonical checkpoint to stay launched after reload, saw ${execution.status}.`);
+  }
+  if (!execution.workspace?.path) {
+    throw new Error('Expected launched execution to persist workspace metadata.');
+  }
+  if (!execution.workspace.path.includes('/workspaces/')) {
+    throw new Error(`Expected launched workspace to be a visible peer workspace, saw ${execution.workspace.path}.`);
+  }
+  if (execution.workspace.strategy !== 'shared-store-worktree') {
+    throw new Error(`Expected launched workspace strategy to persist, saw ${execution.workspace.strategy}.`);
+  }
+}
+
 await fs.mkdir(importedRoot, { recursive: true });
 await fs.mkdir(runtimeRoot, { recursive: true });
 await runCommand('npx', ['agent-browser', 'install']);
@@ -690,6 +803,7 @@ const server = spawn('npm', ['run', 'start'], {
 try {
   await waitForHealth();
   await runBrowser(['close']).catch(() => undefined);
+  await assertWorkspaceSubsystem();
 
   await runBrowser(['open', baseUrl]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
@@ -759,6 +873,7 @@ try {
   await runBrowser(['open', `${baseUrl}/?change=cu_validation_rollup_checkpoint`]);
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
   await assertExecutionLaunched();
+  await assertExecutionWorkspacePersistence();
   await browserEval(
     [
       '(async () => {',
