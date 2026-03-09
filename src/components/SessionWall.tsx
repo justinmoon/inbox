@@ -96,14 +96,16 @@ export function SessionWall({
                   </div>
                 </header>
 
-                <CodexSessionSurface
-                  session={session}
-                  liveSessionUpdates={liveSessionUpdates}
-                  onRespondApproval={onRespondApproval}
-                  respondingApprovalIds={respondingApprovalIds}
-                  approvalErrorMessage={approvalErrorMessage}
-                  variant="wall"
-                />
+                <div className="session-wall-column-body">
+                  <CodexSessionSurface
+                    session={session}
+                    liveSessionUpdates={liveSessionUpdates}
+                    onRespondApproval={onRespondApproval}
+                    respondingApprovalIds={respondingApprovalIds}
+                    approvalErrorMessage={approvalErrorMessage}
+                    variant="wall"
+                  />
+                </div>
               </div>
             </section>
           );
