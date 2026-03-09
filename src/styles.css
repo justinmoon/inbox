@@ -1703,7 +1703,7 @@ body.is-resizing-replay {
 }
 
 .thread-code-block {
-  overflow: auto;
+  overflow: visible;
   margin: 0;
   border: 1px solid rgba(23, 38, 44, 0.08);
   border-radius: 12px;
@@ -1719,7 +1719,7 @@ body.is-resizing-replay {
 }
 
 .thread-command-output {
-  max-height: 18rem;
+  max-height: none;
 }
 
 .thread-file-change-list {

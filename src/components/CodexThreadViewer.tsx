@@ -41,6 +41,63 @@ function stringifyUnknownArray(value: unknown): string[] {
   return value.map((entry) => (typeof entry === 'string' ? entry : formatJson(entry)));
 }
 
+function extractStructuredText(value: unknown): string[] {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      try {
+        return extractStructuredText(JSON.parse(trimmed));
+      } catch {
+        return [value];
+      }
+    }
+
+    return [value];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => extractStructuredText(entry));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  const directText = [
+    record.text,
+    record.message,
+    record.output_text,
+    record.input_text,
+    record.body,
+    record.value,
+  ].flatMap((entry) => extractStructuredText(entry));
+  if (directText.length > 0) {
+    return directText;
+  }
+
+  return [
+    ...extractStructuredText(record.content),
+    ...extractStructuredText(record.contents),
+    ...extractStructuredText(record.items),
+    ...extractStructuredText(record.parts),
+    ...extractStructuredText(record.messages),
+  ];
+}
+
+function normalizeThreadMessageText(value: string): string {
+  const extracted = extractStructuredText(value)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  return extracted.length > 0 ? extracted.join('\n\n') : value;
+}
+
 function summarizeCommandActions(value: unknown): string | null {
   if (!Array.isArray(value) || value.length === 0) return null;
   return value
@@ -137,7 +194,9 @@ function ThreadItemBody({ item }: { item: CodexThreadItem }) {
       const agentItem = item as Extract<CodexThreadItem, { type: 'agentMessage' }>;
       return (
         <div className="thread-item-body markdown-body thread-markdown">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{agentItem.text}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {normalizeThreadMessageText(agentItem.text)}
+          </ReactMarkdown>
         </div>
       );
     }
