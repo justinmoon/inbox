@@ -97,6 +97,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 
+function hasReservedModifier(event: KeyboardEvent): boolean {
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+
 export function App() {
   const [items, setItems] = useState<ChangeUnitListItem[]>([]);
   const [detail, setDetail] = useState<ChangeUnitDetail | null>(null);
@@ -254,6 +258,7 @@ export function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isTypingTarget(event.target) && event.key !== 'Escape') return;
+      if (hasReservedModifier(event)) return;
 
       if (event.key === '?' || (event.key === '/' && event.shiftKey)) {
         event.preventDefault();
