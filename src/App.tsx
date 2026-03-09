@@ -13,6 +13,7 @@ import { ChangeUnitSurface } from './components/ChangeUnitSurface.tsx';
 import { HotkeyOverlay } from './components/HotkeyOverlay.tsx';
 import { InboxRail } from './components/InboxRail.tsx';
 import { SessionReplayPanel } from './components/SessionReplayPanel.tsx';
+import { SessionWall } from './components/SessionWall.tsx';
 import {
   RequestError,
   fetchChangeUnitDetail,
@@ -33,11 +34,10 @@ type LiveSessionUpdates = {
 const REPLAY_PANE_STORAGE_KEY = 'inbox.replayPaneWidth';
 const DEFAULT_REPLAY_PANE_WIDTH = 420;
 const MIN_REPLAY_PANE_WIDTH = 320;
-const FOCUS_MIN_REPLAY_PANE_WIDTH = 520;
 const REPLAY_PANE_STEP = 48;
 
-function clampReplayPaneWidth(width: number, replayFocused: boolean): number {
-  const minWidth = replayFocused ? FOCUS_MIN_REPLAY_PANE_WIDTH : MIN_REPLAY_PANE_WIDTH;
+function clampReplayPaneWidth(width: number): number {
+  const minWidth = MIN_REPLAY_PANE_WIDTH;
   const viewportWidth = typeof window === 'undefined' ? 1440 : window.innerWidth;
   const maxWidth = Math.max(minWidth, Math.min(960, Math.floor(viewportWidth * 0.72)));
   return Math.min(Math.max(Math.round(width), minWidth), maxWidth);
@@ -49,10 +49,10 @@ function readReplayPaneWidth(): number {
   const raw = window.localStorage.getItem(REPLAY_PANE_STORAGE_KEY);
   const parsed = raw ? Number(raw) : Number.NaN;
   if (!Number.isFinite(parsed)) {
-    return clampReplayPaneWidth(DEFAULT_REPLAY_PANE_WIDTH, false);
+    return clampReplayPaneWidth(DEFAULT_REPLAY_PANE_WIDTH);
   }
 
-  return clampReplayPaneWidth(parsed, false);
+  return clampReplayPaneWidth(parsed);
 }
 
 function readSelectedChangeId(): string | null {
@@ -106,7 +106,7 @@ export function App() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [preferredSessionId, setPreferredSessionId] = useState<string | null>(null);
-  const [replayFocused, setReplayFocused] = useState(false);
+  const [sessionWallOpen, setSessionWallOpen] = useState(false);
   const [replayPaneWidth, setReplayPaneWidth] = useState<number>(() => readReplayPaneWidth());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [emptyMessage, setEmptyMessage] = useState<string | null>(null);
@@ -122,6 +122,7 @@ export function App() {
   const itemButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const mainReviewRef = useRef<HTMLElement | null>(null);
   const replayPanelRef = useRef<HTMLElement | null>(null);
+  const wallColumnRefs = useRef(new Map<string, HTMLDivElement>());
   const replayDragStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(
     null,
   );
@@ -215,21 +216,19 @@ export function App() {
 
   useEffect(() => {
     const onResize = () => {
-      setReplayPaneWidth((current) => clampReplayPaneWidth(current, replayFocused));
+      setReplayPaneWidth((current) => clampReplayPaneWidth(current));
     };
 
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [replayFocused]);
+  }, []);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
       const dragState = replayDragStateRef.current;
       if (!dragState) return;
 
-      setReplayPaneWidth(
-        clampReplayPaneWidth(dragState.startWidth + (dragState.startX - event.clientX), replayFocused),
-      );
+      setReplayPaneWidth(clampReplayPaneWidth(dragState.startWidth + (dragState.startX - event.clientX)));
     };
 
     const stopDragging = (event: PointerEvent) => {
@@ -250,7 +249,7 @@ export function App() {
       window.removeEventListener('pointerup', stopDragging);
       window.removeEventListener('pointercancel', stopDragging);
     };
-  }, [replayFocused]);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -270,6 +269,43 @@ export function App() {
 
       if (helpOpen) return;
 
+      if (sessionWallOpen) {
+        switch (event.key) {
+          case 'Escape':
+          case 'r':
+            event.preventDefault();
+            setSessionWallOpen(false);
+            return;
+          case 'h':
+            event.preventDefault();
+            moveSessionSelection(-1);
+            return;
+          case 'l':
+            event.preventDefault();
+            moveSessionSelection(1);
+            return;
+          case 'j':
+            event.preventDefault();
+            scrollActiveWallColumn(220);
+            return;
+          case 'k':
+            event.preventDefault();
+            scrollActiveWallColumn(-220);
+            return;
+          case 'g':
+            event.preventDefault();
+            jumpActiveWallColumn('top');
+            return;
+          case 'G':
+            if (event.shiftKey) {
+              event.preventDefault();
+              jumpActiveWallColumn('bottom');
+              return;
+            }
+            break;
+        }
+      }
+
       switch (event.key) {
         case 'j':
           event.preventDefault();
@@ -285,7 +321,7 @@ export function App() {
           break;
         case 'r':
           event.preventDefault();
-          toggleReplayFocus();
+          setSessionWallOpen(true);
           break;
         case '[':
           event.preventDefault();
@@ -312,7 +348,7 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeSessionId, helpOpen, mainQueueItems, orderedSessionIds, replayFocused, selectedId]);
+  }, [activeSessionId, helpOpen, mainQueueItems, orderedSessionIds, sessionWallOpen, selectedId]);
 
   function selectChangeUnit(id: string, replace = false) {
     startTransition(() => {
@@ -337,18 +373,31 @@ export function App() {
     const startIndex = currentIndex >= 0 ? currentIndex : 0;
     const nextIndex = (startIndex + delta + orderedSessionIds.length) % orderedSessionIds.length;
     setPreferredSessionId(orderedSessionIds[nextIndex]);
+    if (sessionWallOpen) {
+      wallColumnRefs.current.get(orderedSessionIds[nextIndex])?.focus();
+      return;
+    }
+
     replayPanelRef.current?.focus();
   }
 
   function resizeReplayPane(delta: number) {
-    setReplayPaneWidth((current) => clampReplayPaneWidth(current + delta, replayFocused));
+    setReplayPaneWidth((current) => clampReplayPaneWidth(current + delta));
   }
 
-  function toggleReplayFocus() {
-    setReplayFocused((current) => {
-      const next = !current;
-      setReplayPaneWidth((width) => clampReplayPaneWidth(width, next));
-      return next;
+  function scrollActiveWallColumn(delta: number) {
+    if (!activeSessionId) return;
+    wallColumnRefs.current.get(activeSessionId)?.scrollBy({ top: delta, behavior: 'smooth' });
+  }
+
+  function jumpActiveWallColumn(position: 'top' | 'bottom') {
+    if (!activeSessionId) return;
+
+    const node = wallColumnRefs.current.get(activeSessionId);
+    if (!node) return;
+    node.scrollTo({
+      top: position === 'top' ? 0 : node.scrollHeight,
+      behavior: 'smooth',
     });
   }
 
@@ -422,6 +471,11 @@ export function App() {
     currentDetail?.session_views,
     orderedSessionIds,
   ]);
+
+  useEffect(() => {
+    if (!sessionWallOpen || !activeSessionId) return;
+    wallColumnRefs.current.get(activeSessionId)?.focus();
+  }, [activeSessionId, sessionWallOpen]);
 
   useEffect(() => {
     if (!currentDetail || currentDetail.execution_state.status !== 'launched') {
@@ -584,120 +638,141 @@ export function App() {
 
   return (
     <>
-      <div
-        className={`app-shell${replayFocused ? ' is-replay-focused' : ''}`}
-        data-replay-focus={replayFocused}
-        data-replay-pane-width={String(replayPaneWidth)}
-        style={appShellStyle}
-      >
-        <div className="queue-column" data-queue-collapsed={replayFocused}>
-          <InboxRail
-            items={mainQueueItems}
-            landedItems={landedItems}
-            selectedId={selectedId}
-            emptyMessage={errorMessage ?? emptyMessage}
-            onItemRef={(id, node) => {
-              if (node) {
-                itemButtonRefs.current.set(id, node);
-                return;
-              }
-              itemButtonRefs.current.delete(id);
-            }}
-            onSelect={(id) => selectChangeUnit(id)}
-          />
-        </div>
+      {sessionWallOpen && currentDetail ? (
+        <SessionWall
+          detail={currentDetail}
+          activeSessionId={activeSessionId}
+          liveSessionUpdates={liveSessionUpdates}
+          onColumnRef={(sessionId, node) => {
+            if (node) {
+              wallColumnRefs.current.set(sessionId, node);
+              return;
+            }
 
-        <div className="main-column">
-          {errorMessage ? (
-            <div className="banner banner-error">
-              <strong>Request failed.</strong>
-              <span>{errorMessage}</span>
-            </div>
-          ) : null}
-
-          {loadingList ? (
-            <div className="empty-state">
-              <h2>Loading inbox</h2>
-              <p>Reading seeded and imported change units.</p>
-            </div>
-          ) : items.length === 0 ? (
-            <div className="empty-state">
-              <h2>No change units available</h2>
-              <p>
-                {errorMessage ??
-                  emptyMessage ??
-                  'No seeded or imported change units are available right now.'}
-              </p>
-            </div>
-          ) : currentDetail ? (
-            <ChangeUnitSurface
-              detail={currentDetail}
-              focusRef={mainReviewRef}
-              onExecutionStateChange={() => refreshCurrentDetail()}
-              onOpenLiveSession={() => openLiveSession()}
+            wallColumnRefs.current.delete(sessionId);
+          }}
+          onSelectSession={(sessionId) => setPreferredSessionId(sessionId)}
+          onRespondApproval={handleApprovalResponse}
+          respondingApprovalIds={respondingApprovalIds}
+          approvalErrorMessage={approvalErrorMessage}
+          onExit={() => setSessionWallOpen(false)}
+        />
+      ) : (
+        <div
+          className="app-shell"
+          data-replay-pane-width={String(replayPaneWidth)}
+          style={appShellStyle}
+        >
+          <div className="queue-column">
+            <InboxRail
+              items={mainQueueItems}
+              landedItems={landedItems}
+              selectedId={selectedId}
+              emptyMessage={errorMessage ?? emptyMessage}
+              onItemRef={(id, node) => {
+                if (node) {
+                  itemButtonRefs.current.set(id, node);
+                  return;
+                }
+                itemButtonRefs.current.delete(id);
+              }}
+              onSelect={(id) => selectChangeUnit(id)}
             />
-          ) : (
-            <div className="empty-state">
-              <h2>Recovering selection</h2>
-              <p>Switching to the canonical checkpoint for this session.</p>
-            </div>
-          )}
-        </div>
+          </div>
 
-        <div className="splitter-column">
-          <div
-            aria-controls="replay-panel"
-            aria-label="Resize replay pane"
-            aria-orientation="vertical"
-            aria-valuemax={Math.max(FOCUS_MIN_REPLAY_PANE_WIDTH, 960)}
-            aria-valuemin={MIN_REPLAY_PANE_WIDTH}
-            aria-valuenow={replayPaneWidth}
-            className="replay-splitter"
-            data-replay-splitter="true"
-            onPointerDown={startReplayResize}
-            role="separator"
-          />
-        </div>
+          <div className="main-column">
+            {errorMessage ? (
+              <div className="banner banner-error">
+                <strong>Request failed.</strong>
+                <span>{errorMessage}</span>
+              </div>
+            ) : null}
 
-        <div className="right-column">
-          {loadingDetail && !currentDetail ? (
-            <div className="empty-panel">
-              <p>Loading replay…</p>
-            </div>
-          ) : currentDetail ? (
-            <SessionReplayPanel
-              detail={currentDetail}
-              panelId="replay-panel"
-              focusRef={replayPanelRef}
-              preferredSessionId={activeSessionId}
-              liveSessionUpdates={liveSessionUpdates}
-              replayFocused={replayFocused}
-              onSelectSession={(sessionId) => setPreferredSessionId(sessionId)}
-              onRespondApproval={handleApprovalResponse}
-              respondingApprovalIds={respondingApprovalIds}
-              approvalErrorMessage={approvalErrorMessage}
+            {loadingList ? (
+              <div className="empty-state">
+                <h2>Loading inbox</h2>
+                <p>Reading seeded and imported change units.</p>
+              </div>
+            ) : items.length === 0 ? (
+              <div className="empty-state">
+                <h2>No change units available</h2>
+                <p>
+                  {errorMessage ??
+                    emptyMessage ??
+                    'No seeded or imported change units are available right now.'}
+                </p>
+              </div>
+            ) : currentDetail ? (
+              <ChangeUnitSurface
+                detail={currentDetail}
+                focusRef={mainReviewRef}
+                onExecutionStateChange={() => refreshCurrentDetail()}
+                onOpenLiveSession={() => openLiveSession()}
+              />
+            ) : (
+              <div className="empty-state">
+                <h2>Recovering selection</h2>
+                <p>Switching to the canonical checkpoint for this session.</p>
+              </div>
+            )}
+          </div>
+
+          <div className="splitter-column">
+            <div
+              aria-controls="replay-panel"
+              aria-label="Resize replay pane"
+              aria-orientation="vertical"
+              aria-valuemax={960}
+              aria-valuemin={MIN_REPLAY_PANE_WIDTH}
+              aria-valuenow={replayPaneWidth}
+              className="replay-splitter"
+              data-replay-splitter="true"
+              onPointerDown={startReplayResize}
+              role="separator"
             />
-          ) : (
-            <div className="empty-panel">
-              <p>Replay will appear here for the selected change unit.</p>
-            </div>
-          )}
-        </div>
-      </div>
+          </div>
 
-      <button
-        className="floating-help-button"
-        aria-label="Open keyboard shortcuts help"
-        aria-haspopup="dialog"
-        aria-expanded={helpOpen}
-        onClick={() => setHelpOpen(true)}
-        type="button"
-      >
-        <span className="floating-help-glyph" aria-hidden="true">
-          ?
-        </span>
-        <span>Keys</span>
-      </button>
+          <div className="right-column">
+            {loadingDetail && !currentDetail ? (
+              <div className="empty-panel">
+                <p>Loading replay…</p>
+              </div>
+            ) : currentDetail ? (
+              <SessionReplayPanel
+                detail={currentDetail}
+                panelId="replay-panel"
+                focusRef={replayPanelRef}
+                preferredSessionId={activeSessionId}
+                liveSessionUpdates={liveSessionUpdates}
+                onSelectSession={(sessionId) => setPreferredSessionId(sessionId)}
+                onRespondApproval={handleApprovalResponse}
+                respondingApprovalIds={respondingApprovalIds}
+                approvalErrorMessage={approvalErrorMessage}
+              />
+            ) : (
+              <div className="empty-panel">
+                <p>Replay will appear here for the selected change unit.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!sessionWallOpen ? (
+        <button
+          className="floating-help-button"
+          aria-label="Open keyboard shortcuts help"
+          aria-haspopup="dialog"
+          aria-expanded={helpOpen}
+          onClick={() => setHelpOpen(true)}
+          type="button"
+        >
+          <span className="floating-help-glyph" aria-hidden="true">
+            ?
+          </span>
+          <span>Keys</span>
+        </button>
+      ) : null}
 
       <HotkeyOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </>

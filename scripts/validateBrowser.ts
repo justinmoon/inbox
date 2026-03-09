@@ -267,59 +267,6 @@ async function assertReplayWorkspaceControls() {
       '})()',
     ].join(' '),
   );
-
-  await pressKey('r');
-  await browserEval(
-    [
-      '(async () => {',
-      "  const shell = document.querySelector('.app-shell');",
-      "  const rightColumn = document.querySelector('.right-column');",
-      "  const queueColumn = document.querySelector('.queue-column');",
-      "  if (!(shell instanceof HTMLElement) || !(rightColumn instanceof HTMLElement) || !(queueColumn instanceof HTMLElement)) {",
-      "    throw new Error('Replay focus mode elements are missing.');",
-      '  }',
-      '  const deadline = Date.now() + 3000;',
-      '  while (Date.now() < deadline) {',
-      "    const focused = shell.getAttribute('data-replay-focus');",
-      '    const replayWidth = Math.round(rightColumn.getBoundingClientRect().width);',
-      "    if (focused === 'true' && replayWidth >= 500 && queueColumn.getAttribute('data-queue-collapsed') === 'true') return;",
-      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
-      '  }',
-      "  throw new Error('Replay focus mode did not take over the layout.');",
-      '})()',
-    ].join(' '),
-  );
-
-  await pressKey(']');
-  await browserEval(
-    [
-      '(async () => {',
-      '  const deadline = Date.now() + 3000;',
-      '  while (Date.now() < deadline) {',
-      "    const activeRole = document.querySelector('.replay-panel')?.getAttribute('data-active-session-role');",
-      "    if (activeRole === 'implementer') return;",
-      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
-      '  }',
-      "  throw new Error('Session hotkeys should still work in replay focus mode.');",
-      '})()',
-    ].join(' '),
-  );
-
-  await pressKey('r');
-  await browserEval(
-    [
-      '(async () => {',
-      "  const shell = document.querySelector('.app-shell');",
-      "  if (!(shell instanceof HTMLElement)) throw new Error('Missing app shell after exiting focus mode.');",
-      '  const deadline = Date.now() + 3000;',
-      '  while (Date.now() < deadline) {',
-      "    if (shell.getAttribute('data-replay-focus') === 'false') return;",
-      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
-      '  }',
-      "  throw new Error('Replay focus mode did not exit cleanly.');",
-      '})()',
-    ].join(' '),
-  );
 }
 
 async function assertReplayWidthPersists(expectedChangeId: string) {
@@ -337,6 +284,145 @@ async function assertReplayWidthPersists(expectedChangeId: string) {
       '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
       '  }',
       "  throw new Error(`Replay pane width did not persist after reload. Expected ${storedWidth}, saw ${shell.getAttribute('data-replay-pane-width')}.`);",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertSessionWallMode(expectedRoles: string[]) {
+  await pressKey('r');
+  await browserEval(
+    [
+      '(async () => {',
+      `  const expectedRoles = ${JSON.stringify(expectedRoles)};`,
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      "    const wall = document.querySelector('.session-wall');",
+      "    const columns = [...document.querySelectorAll('[data-wall-session-role]')];",
+      "    const review = document.querySelector('.review-surface');",
+      "    const queue = document.querySelector('.inbox-rail');",
+      "    if (wall && !review && !queue && columns.length >= expectedRoles.length) {",
+      "      const roles = columns.map((node) => node.getAttribute('data-wall-session-role'));",
+      '      for (const role of expectedRoles) {',
+      "        if (!roles.includes(role)) throw new Error(`Missing wall column for ${role}.`);",
+      '      }',
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Session wall mode did not replace the normal review cockpit.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await browserEval(
+    [
+      '(async () => {',
+      "  const preferred = document.querySelector('[data-wall-session-role=\"implementer\"]');",
+      "  if (preferred instanceof HTMLElement) preferred.click();",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      "  const active = document.querySelector('[data-wall-column-active=\"true\"]');",
+      "  if (!active) throw new Error('Expected an active wall column.');",
+      "  window.__wallInitialRole = active.getAttribute('data-wall-session-role');",
+      "  const scrollTarget = active.querySelector('.session-wall-column-scroll');",
+      "  if (!(scrollTarget instanceof HTMLElement)) throw new Error('Missing wall scroll target.');",
+      '  scrollTarget.scrollTo({ top: 160 });',
+      '  await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      "  window.__wallScrolledBefore = scrollTarget.scrollTop;",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('l');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    const active = document.querySelector('[data-wall-column-active=\"true\"]');",
+      "    const role = active?.getAttribute('data-wall-session-role');",
+      "    if (role && role !== window.__wallInitialRole) {",
+      '      window.__wallNextRole = role;',
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Wall next-column hotkey did not move the active column.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('h');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 3000;',
+      '  while (Date.now() < deadline) {',
+      "    const active = document.querySelector('[data-wall-column-active=\"true\"]');",
+      "    const role = active?.getAttribute('data-wall-session-role');",
+      "    if (role === window.__wallInitialRole) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Wall previous-column hotkey did not restore the prior active column.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('j');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      "    const active = document.querySelector('[data-wall-column-active=\"true\"] .session-wall-column-scroll');",
+      "    if (active instanceof HTMLElement && active.scrollTop > Number(window.__wallScrolledBefore ?? 0)) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Wall down-scroll hotkey did not move the active column.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('g');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      "    const active = document.querySelector('[data-wall-column-active=\"true\"] .session-wall-column-scroll');",
+      "    if (active instanceof HTMLElement && active.scrollTop <= 2) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Wall top-jump hotkey did not reset scroll.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('G', { shiftKey: true });
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      "    const active = document.querySelector('[data-wall-column-active=\"true\"] .session-wall-column-scroll');",
+      "    if (active instanceof HTMLElement && active.scrollTop + active.clientHeight >= active.scrollHeight - 6) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Wall bottom-jump hotkey did not reach the end of the active column.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await pressKey('Escape');
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 4000;',
+      '  while (Date.now() < deadline) {',
+      "    if (document.querySelector('.app-shell') && document.querySelector('.review-surface') && !document.querySelector('.session-wall')) return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Esc should exit session wall mode back to the review cockpit.');",
       '})()',
     ].join(' '),
   );
@@ -649,6 +735,13 @@ try {
     ].join(' '),
   );
   await assertExecutionLaunched();
+  await assertSessionWallMode([
+    'planner',
+    'implementer',
+    'reviewer_a',
+    'reviewer_b',
+    'live_session',
+  ]);
   const commandApproval = await injectApproval('commandExecution');
   await assertApprovalCard('commandExecution', 'pending', commandApproval.request_id);
   await answerApproval('commandExecution', commandApproval.request_id, 'accept');
