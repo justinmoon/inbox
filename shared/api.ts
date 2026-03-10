@@ -6,6 +6,12 @@ import type {
   WorkspaceProviderKind,
   WorkspaceRecord,
 } from './workspaces.ts';
+import type {
+  GateRecord,
+  WorkflowDefinitionDetail,
+  WorkflowDefinitionSummary,
+  WorkflowRunRecord,
+} from './workflowRuntime.ts';
 
 export type ChangeUnitListItem = {
   id: string;
@@ -318,4 +324,26 @@ export type ResolveWorkspaceRequest = {
     tags?: string[];
     metadata?: Record<string, string>;
   };
+};
+
+export type ListWorkflowDefinitionsResponse = {
+  workflows: WorkflowDefinitionSummary[];
+};
+
+export type ReadWorkflowDefinitionResponse = {
+  workflow: WorkflowDefinitionDetail;
+};
+
+export type CreateWorkflowRunRequest = {
+  workflow_id: string;
+  repo_id?: string;
+  repo_path?: string;
+  goal_prompt: string;
+  tags?: string[];
+  metadata?: Record<string, string>;
+};
+
+export type CreateWorkflowRunResponse = {
+  run: WorkflowRunRecord;
+  open_gates: GateRecord[];
 };

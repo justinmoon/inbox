@@ -355,3 +355,117 @@ The next implementation slice should:
 - add one concrete `plan-implement-review` workflow file
 - add a generated workflow definition diagram
 - stop short of replacing the whole UI in one pass
+
+## Current First Slice Shape
+
+The current first implementation slice now adds these concrete runtime objects:
+
+- `WorkflowRunRecord`
+  - generic persisted run record
+  - fields include:
+    - `id`
+    - `workflow_id`
+    - `workflow_version`
+    - `status`
+    - `current_state_id`
+    - `current_state_family`
+    - `repo`
+      - `repo_id`
+      - `repo_path`
+    - `goal_prompt`
+    - `open_gate_ids`
+    - `last_transition_id`
+    - `created_at`
+    - `updated_at`
+    - `completed_at`
+    - `tags`
+    - `metadata`
+- `GateRecord`
+  - generic persisted gate record
+  - fields include:
+    - `id`
+    - `run_id`
+    - `workflow_id`
+    - `definition_gate_id`
+    - `state_id`
+    - `kind`
+    - `actor`
+    - `title`
+    - `description`
+    - `status`
+    - `blocking`
+    - `options`
+    - `opened_at`
+    - `answered_at`
+    - `closed_at`
+    - `tags`
+    - `metadata`
+- `WorkflowDefinition`
+  - server-side TypeScript definition object loaded from a registry
+  - owns:
+    - metadata
+    - initial state
+    - explicit states
+    - explicit transitions
+    - gate templates
+    - prompt functions
+    - marker protocol definitions
+    - parser hooks
+
+The current persisted storage is:
+
+- `data/runtime/workflow-runs.json`
+- `data/runtime/workflow-gates.json`
+
+## Current Workflow Definition File
+
+The first concrete workflow definition now lives in:
+
+- [server/workflows/planImplementReview.ts](/Users/justin/code/inbox/server/workflows/planImplementReview.ts)
+
+That file is intentionally the readable source of truth for:
+
+- workflow metadata
+- explicit state list
+- explicit transition list
+- user gate definitions for approval states
+- planner/reviewer prompt functions
+- deterministic marker protocol:
+  - `<first_prompt_candidate>...</first_prompt_candidate>`
+  - `<review_result status="accepted" />`
+  - `<review_result status="fixup_required">...</review_result>`
+  - `<review_result status="replan_required">...</review_result>`
+  - `<tutorial>...</tutorial>`
+  - `<next_prompt>...</next_prompt>`
+- parser hooks that only look for those explicit markers
+
+## Current Service Boundary
+
+The current narrow runtime/service layer now does four things:
+
+- loads workflow definitions from a registry
+- enumerates available workflow definitions
+- validates the state graph and gate wiring
+- serializes a machine-readable definition view including Mermaid state-diagram text
+
+The current minimal API surface is:
+
+- `GET /api/workflows`
+- `GET /api/workflows/:id`
+- `POST /api/workflow-runs`
+
+The run-creation endpoint currently creates a persisted run in its initial state and opens any gates attached to that initial state. It does not yet start Codex sessions or move the run forward.
+
+## Still Missing Before Real Workflow Execution
+
+This first slice intentionally does not yet include:
+
+- a workflow engine that advances runs through transitions
+- persisted runtime events or transition history
+- `AgentSession` and `Artifact` runtime objects
+- a Codex client boundary wired into workflow execution
+- automatic prompt dispatch
+- parser-hook execution against real Codex outputs
+- gate answering and transition application
+- live run graph generation from actual runtime state
+- a product UI centered on workflow runs instead of checkpoint bundles

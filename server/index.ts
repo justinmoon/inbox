@@ -6,10 +6,12 @@ import express from 'express';
 import type {
   ChangeUnitDetail,
   ChangeUnitExecutionLaunched,
+  CreateWorkflowRunRequest,
   CreateWorkspaceRequest,
   EnsureRepositoryRequest,
   ExecuteNextActionResult,
   ListRepositoriesResponse,
+  ListWorkflowDefinitionsResponse,
   ListWorkspacesResponse,
   RespondApprovalResult,
 } from '../shared/api.ts';
@@ -26,12 +28,24 @@ import {
   persistImportedBundle,
 } from './importBundles.ts';
 import { LiveApprovalStore } from './liveApprovalStore.ts';
+import { GateStore } from './gateStore.ts';
+import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
+import { WorkflowRunService } from './workflowRunService.ts';
+import { WorkflowRunStore } from './workflowRunStore.ts';
 import { WorkspaceService } from './workspaceService.ts';
 
 const config = readConfig(process.env);
 const appServer = new AppServerProcess({ codexBin: config.codexBin });
 const executionStateStore = new ExecutionStateStore(config.runtimeRoot);
 const workspaceService = new WorkspaceService(config.runtimeRoot);
+const workflowDefinitionService = new WorkflowDefinitionService();
+const workflowRunStore = new WorkflowRunStore(config.runtimeRoot);
+const gateStore = new GateStore(config.runtimeRoot);
+const workflowRunService = new WorkflowRunService({
+  definitions: workflowDefinitionService,
+  runs: workflowRunStore,
+  gates: gateStore,
+});
 const liveSessionSubscribers = new Map<string, Set<express.Response>>();
 const liveApprovalStore = new LiveApprovalStore();
 
@@ -413,6 +427,16 @@ async function createWorkspace(request: CreateWorkspaceRequest) {
   return await workspaceService.createWorkspace(request);
 }
 
+async function listWorkflowDefinitions(): Promise<ListWorkflowDefinitionsResponse> {
+  return {
+    workflows: workflowDefinitionService.listDefinitions(),
+  };
+}
+
+async function createWorkflowRun(request: CreateWorkflowRunRequest) {
+  return await workflowRunService.createRun(request);
+}
+
 async function respondToApproval(args: {
   threadId: string;
   requestId: number;
@@ -587,6 +611,75 @@ app.post('/api/workspaces', async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to create workspace.';
     res.status(400).json({ error: 'workspace_create_failed', message });
+  }
+});
+
+app.get('/api/workflows', async (_req, res) => {
+  try {
+    res.json(await listWorkflowDefinitions());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to list workflows.';
+    res.status(500).json({ error: 'workflow_list_failed', message });
+  }
+});
+
+app.get('/api/workflows/:id', async (req, res) => {
+  try {
+    const workflow = workflowDefinitionService.readDefinition(req.params.id);
+    if (!workflow) {
+      res.status(404).json({
+        error: 'not_found',
+        message: `Workflow "${req.params.id}" was not found.`,
+      });
+      return;
+    }
+
+    res.json({ workflow });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to read workflow.';
+    res.status(500).json({ error: 'workflow_read_failed', message });
+  }
+});
+
+app.post('/api/workflow-runs', async (req, res) => {
+  const workflowId = readString(req.body?.workflow_id);
+  const goalPrompt = readString(req.body?.goal_prompt);
+  const repoId = readString(req.body?.repo_id) ?? undefined;
+  const repoPathInput = readString(req.body?.repo_path);
+  const repoPath = repoPathInput ? resolveActionPath(repoPathInput) : undefined;
+
+  if (!workflowId) {
+    res.status(400).json({ error: 'invalid_workflow_id', message: 'workflow_id is required.' });
+    return;
+  }
+
+  if (!goalPrompt) {
+    res.status(400).json({ error: 'invalid_goal_prompt', message: 'goal_prompt is required.' });
+    return;
+  }
+
+  if (!repoId && !repoPath) {
+    res.status(400).json({
+      error: 'invalid_repo_input',
+      message: 'repo_id or repo_path is required.',
+    });
+    return;
+  }
+
+  try {
+    const result = await createWorkflowRun({
+      workflow_id: workflowId,
+      repo_id: repoId,
+      repo_path: repoPath,
+      goal_prompt: goalPrompt,
+      tags: readStringArray(req.body?.tags),
+      metadata: readStringMap(req.body?.metadata),
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to create workflow run.';
+    const status = /not found/i.test(message) ? 404 : /invalid/i.test(message) ? 400 : 400;
+    res.status(status).json({ error: 'workflow_run_create_failed', message });
   }
 });
 
