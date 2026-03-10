@@ -1638,15 +1638,18 @@ body.is-resizing-replay {
   flex-direction: column;
   gap: 0.85rem;
   padding: 0.95rem 1rem;
-  border: 1px solid rgba(35, 82, 61, 0.12);
+  border: 1px solid var(--green-soft);
   border-radius: 18px;
-  background: rgba(229, 244, 236, 0.7);
+  background:
+    linear-gradient(180deg, var(--green-soft), var(--surface-softest) 72%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .execution-note {
   margin: 0.25rem 0 0;
   font-size: 0.9rem;
-  color: var(--green);
+  color: var(--green-ink);
+  font-weight: 600;
 }
 
 .execution-metadata,
@@ -1676,6 +1679,16 @@ body.is-resizing-replay {
 .live-session-metadata dd {
   margin: 0;
   color: var(--ink);
+}
+
+.execution-record code {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.18rem 0.45rem;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--ink-inverse);
+  overflow-wrap: anywhere;
 }
 
 .execution-error {
@@ -1775,6 +1788,8 @@ body.is-resizing-replay {
 
 .diff-line {
   display: block;
+  margin: 0 -0.9rem;
+  padding: 0.08rem 0.9rem;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1784,16 +1799,22 @@ body.is-resizing-replay {
 }
 
 .diff-line-hunk {
-  color: var(--blue);
+  color: var(--blue-ink);
+  background: var(--blue-soft);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--blue);
 }
 
 .diff-line-add {
-  background: rgba(60, 113, 88, 0.12);
+  color: var(--green-ink);
+  background: rgba(34, 68, 46, 0.42);
+  box-shadow: inset 3px 0 0 var(--green);
 }
 
 .diff-line-del {
-  background: rgba(164, 82, 66, 0.12);
+  color: var(--red-ink);
+  background: rgba(82, 34, 46, 0.4);
+  box-shadow: inset 3px 0 0 var(--red);
 }
 
 .session-tab,
