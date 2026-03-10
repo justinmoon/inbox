@@ -469,3 +469,72 @@ This first slice intentionally does not yet include:
 - gate answering and transition application
 - live run graph generation from actual runtime state
 - a product UI centered on workflow runs instead of checkpoint bundles
+
+## Current Executable Slice
+
+The current executable workflow slice now proves one real path:
+
+- create a `plan-implement-review` run
+- start the planner/reviewer Codex thread
+- run the planner conversation prompt from the workflow definition
+- accept follow-up user planning messages on the same thread
+- parse the completed planner turn with the workflow-defined marker hook
+- transition from `planning_conversation` to `first_prompt_approval` when `<first_prompt_candidate>` appears
+- open the configured approval gate for `first_prompt_approval`
+
+## Additional Runtime Objects
+
+The runtime now also persists:
+
+- `AgentSessionRecord`
+  - enough to know which Codex thread belongs to a run
+  - current fields include:
+    - `thread_id`
+    - `state_id`
+    - `actor`
+    - `workspace_id`
+    - `cwd`
+    - `latest_turn_id`
+    - `status`
+- `RunEventRecord`
+  - enough to know what happened to a run and when
+  - current fields include:
+    - `type`
+    - `summary`
+    - `from_state_id`
+    - `to_state_id`
+    - `transition_id`
+    - `session_id`
+    - `thread_id`
+    - `turn_id`
+    - `created_at`
+
+The current persisted runtime files now include:
+
+- `data/runtime/workflow-agent-sessions.json`
+- `data/runtime/workflow-run-events.json`
+
+## Current Codex Boundary
+
+The workflow runtime now talks to Codex through a small `CodexClient` service boundary rather than raw JSON-RPC calls inside the runtime service.
+
+The current boundary supports:
+
+- `startThread`
+- `resumeThread`
+- `startTurn`
+- `waitForTurnCompletion`
+- `readThread`
+
+This is enough for the planning-conversation slice and keeps the workflow runtime detached from transport details.
+
+## Remaining Gaps Before Implementer Execution
+
+The runtime still does not yet include:
+
+- the implementer session path
+- review execution and review-result transitions
+- artifact generation and post-review forks
+- gate answering and transition application from user approval states
+- a reusable event-driven engine for all workflow states
+- a workflow-run UI that replaces the checkpoint-first product flow

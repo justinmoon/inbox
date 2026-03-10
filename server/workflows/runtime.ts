@@ -58,6 +58,29 @@ export type WorkflowTransitionGraph = {
   terminal_state_ids: string[];
 };
 
+export function getWorkflowState(definition: WorkflowDefinition, stateId: string) {
+  return definition.states.find((state) => state.id === stateId) ?? null;
+}
+
+export function getWorkflowPrompt(definition: WorkflowDefinition, promptId: string) {
+  return definition.prompts.find((prompt) => prompt.id === promptId) ?? null;
+}
+
+export function getWorkflowParserHook(definition: WorkflowDefinition, parserHookId: string) {
+  return definition.parser_hooks.find((hook) => hook.id === parserHookId) ?? null;
+}
+
+export function findWorkflowTransition(definition: WorkflowDefinition, args: {
+  fromStateId: string;
+  event: string;
+}) {
+  return (
+    definition.transitions.find(
+      (transition) => transition.from === args.fromStateId && transition.event === args.event,
+    ) ?? null
+  );
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -222,6 +245,7 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Work
   const promptIds = new Set<string>();
   const markerIds = new Set<string>();
   const parserHookIds = new Set<string>();
+  const stateById = new Map(definition.states.map((state) => [state.id, state]));
 
   for (const state of definition.states) {
     if (stateIds.has(state.id)) {
@@ -244,8 +268,6 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Work
       state_id: definition.initial_state_id,
     });
   }
-
-  const stateById = new Map(definition.states.map((state) => [state.id, state]));
 
   for (const transition of definition.transitions) {
     if (transitionIds.has(transition.id)) {
@@ -277,6 +299,10 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Work
         state_id: transition.to,
       });
     }
+  }
+
+  for (const parserHook of definition.parser_hooks) {
+    parserHookIds.add(parserHook.id);
   }
 
   for (const gate of definition.gates) {
@@ -360,6 +386,16 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Work
         });
       }
     }
+
+    for (const parserHookId of prompt.parser_hook_ids) {
+      if (!parserHookIds.has(parserHookId)) {
+        issues.push({
+          level: 'error',
+          code: 'prompt_uses_unknown_parser_hook',
+          message: `Prompt "${prompt.id}" references unknown parser hook "${parserHookId}".`,
+        });
+      }
+    }
   }
 
   for (const marker of definition.markers) {
@@ -375,15 +411,14 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Work
   }
 
   for (const parserHook of definition.parser_hooks) {
-    if (parserHookIds.has(parserHook.id)) {
+    const duplicateCount = definition.parser_hooks.filter((hook) => hook.id === parserHook.id).length;
+    if (duplicateCount > 1) {
       issues.push({
         level: 'error',
         code: 'duplicate_parser_hook_id',
         message: `Parser hook "${parserHook.id}" is defined more than once.`,
       });
-      continue;
     }
-    parserHookIds.add(parserHook.id);
 
     for (const markerId of parserHook.marker_ids) {
       if (!markerIds.has(markerId)) {
@@ -393,6 +428,17 @@ export function validateWorkflowDefinition(definition: WorkflowDefinition): Work
           message: `Parser hook "${parserHook.id}" references unknown marker "${markerId}".`,
         });
       }
+    }
+
+    if (
+      parserHook.transition_event &&
+      !definition.transitions.some((transition) => transition.event === parserHook.transition_event)
+    ) {
+      issues.push({
+        level: 'error',
+        code: 'parser_hook_uses_unknown_transition_event',
+        message: `Parser hook "${parserHook.id}" references unknown transition event "${parserHook.transition_event}".`,
+      });
     }
   }
 
@@ -493,6 +539,7 @@ export function serializeWorkflowDefinition(definition: WorkflowDefinition): Wor
       description: prompt.description,
       used_in_state_ids: prompt.used_in_state_ids,
       output_marker_ids: prompt.output_marker_ids,
+      parser_hook_ids: prompt.parser_hook_ids,
     })),
     markers: definition.markers.map((marker) => ({
       id: marker.id,
@@ -509,6 +556,7 @@ export function serializeWorkflowDefinition(definition: WorkflowDefinition): Wor
       description: hook.description,
       marker_ids: hook.marker_ids,
       output_kind: hook.output_kind,
+      transition_event: hook.transition_event ?? null,
     })),
     mermaid: renderWorkflowDefinitionMermaid(definition),
   };

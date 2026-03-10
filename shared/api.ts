@@ -7,7 +7,9 @@ import type {
   WorkspaceRecord,
 } from './workspaces.ts';
 import type {
+  AgentSessionRecord,
   GateRecord,
+  RunEventRecord,
   WorkflowDefinitionDetail,
   WorkflowDefinitionSummary,
   WorkflowRunRecord,
@@ -344,6 +346,30 @@ export type CreateWorkflowRunRequest = {
 };
 
 export type CreateWorkflowRunResponse = {
+  detail: WorkflowRunDetail;
+};
+
+export type WorkflowRunSessionDetail = {
+  session: AgentSessionRecord;
+  thread: CodexThread | null;
+  load_error: string | null;
+};
+
+export type WorkflowRunDetail = {
   run: WorkflowRunRecord;
+  sessions: WorkflowRunSessionDetail[];
   open_gates: GateRecord[];
+  events: RunEventRecord[];
+};
+
+export type ReadWorkflowRunResponse = {
+  detail: WorkflowRunDetail;
+};
+
+export type SendPlanningMessageRequest = {
+  message: string;
+};
+
+export type SendPlanningMessageResponse = {
+  detail: WorkflowRunDetail;
 };

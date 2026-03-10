@@ -8,6 +8,7 @@ export const workflowStateFamilies = ['conversation', 'background', 'approval', 
 export const workflowRunStatuses = ['active', 'completed', 'failed', 'cancelled'] as const;
 export const gateStatuses = ['open', 'answered', 'dismissed'] as const;
 export const gateKinds = ['approval', 'input_required'] as const;
+export const agentSessionStatuses = ['active', 'completed', 'failed'] as const;
 
 export const workflowRepositoryInputSchema = z
   .object({
@@ -63,15 +64,55 @@ export const workflowRunSchema = z.object({
   metadata: metadataSchema,
 });
 
+export const agentSessionSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  workflow_id: z.string().min(1),
+  backend: z.literal('codex'),
+  kind: z.string().min(1),
+  actor: z.string().min(1),
+  state_id: z.string().min(1),
+  thread_id: z.string().min(1),
+  workspace_id: z.string().min(1).nullable().default(null),
+  cwd: z.string().min(1).nullable().default(null),
+  latest_turn_id: z.string().min(1).nullable().default(null),
+  status: z.enum(agentSessionStatuses),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+  tags: tagsSchema,
+  metadata: metadataSchema,
+});
+
+export const runEventSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  workflow_id: z.string().min(1),
+  type: z.string().min(1),
+  summary: z.string().min(1),
+  state_id: z.string().min(1).nullable().default(null),
+  from_state_id: z.string().min(1).nullable().default(null),
+  to_state_id: z.string().min(1).nullable().default(null),
+  transition_id: z.string().min(1).nullable().default(null),
+  session_id: z.string().min(1).nullable().default(null),
+  thread_id: z.string().min(1).nullable().default(null),
+  turn_id: z.string().min(1).nullable().default(null),
+  created_at: timestampSchema,
+  tags: tagsSchema,
+  metadata: metadataSchema,
+});
+
 export type WorkflowStateFamily = (typeof workflowStateFamilies)[number];
 export type WorkflowRunStatus = (typeof workflowRunStatuses)[number];
 export type GateStatus = (typeof gateStatuses)[number];
 export type GateKind = (typeof gateKinds)[number];
+export type AgentSessionStatus = (typeof agentSessionStatuses)[number];
 
 export type WorkflowRepositoryInput = z.infer<typeof workflowRepositoryInputSchema>;
 export type GateOptionRecord = z.infer<typeof gateOptionSchema>;
 export type GateRecord = z.infer<typeof gateSchema>;
 export type WorkflowRunRecord = z.infer<typeof workflowRunSchema>;
+export type AgentSessionRecord = z.infer<typeof agentSessionSchema>;
+export type RunEventRecord = z.infer<typeof runEventSchema>;
 
 export type WorkflowDefinitionValidationIssue = {
   level: 'error' | 'warning';
@@ -124,6 +165,7 @@ export type WorkflowDefinitionPromptView = {
   description: string;
   used_in_state_ids: string[];
   output_marker_ids: string[];
+  parser_hook_ids: string[];
 };
 
 export type WorkflowMarkerProtocolView = {
@@ -142,6 +184,7 @@ export type WorkflowParserHookView = {
   description: string;
   marker_ids: string[];
   output_kind: string;
+  transition_event?: string | null;
 };
 
 export type WorkflowDefinitionSummary = {

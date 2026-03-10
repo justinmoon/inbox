@@ -28,7 +28,10 @@ import {
   persistImportedBundle,
 } from './importBundles.ts';
 import { LiveApprovalStore } from './liveApprovalStore.ts';
+import { AgentSessionStore } from './agentSessionStore.ts';
+import { AppServerCodexClient } from './codexClient.ts';
 import { GateStore } from './gateStore.ts';
+import { RunEventStore } from './runEventStore.ts';
 import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
 import { WorkflowRunService } from './workflowRunService.ts';
 import { WorkflowRunStore } from './workflowRunStore.ts';
@@ -41,11 +44,8 @@ const workspaceService = new WorkspaceService(config.runtimeRoot);
 const workflowDefinitionService = new WorkflowDefinitionService();
 const workflowRunStore = new WorkflowRunStore(config.runtimeRoot);
 const gateStore = new GateStore(config.runtimeRoot);
-const workflowRunService = new WorkflowRunService({
-  definitions: workflowDefinitionService,
-  runs: workflowRunStore,
-  gates: gateStore,
-});
+const agentSessionStore = new AgentSessionStore(config.runtimeRoot);
+const runEventStore = new RunEventStore(config.runtimeRoot);
 const liveSessionSubscribers = new Map<string, Set<express.Response>>();
 const liveApprovalStore = new LiveApprovalStore();
 
@@ -209,6 +209,30 @@ async function ensureAppServerStarted() {
     appServerReady = null;
   }
 }
+
+const codexClient = new AppServerCodexClient({
+  process: appServer,
+  clientInfo: {
+    name: 'inbox_review_cockpit',
+    title: 'Inbox Review Cockpit',
+    version: '0.1.0',
+  },
+  ensureStarted: ensureAppServerStarted,
+});
+const workflowRunService = new WorkflowRunService({
+  definitions: workflowDefinitionService,
+  runs: workflowRunStore,
+  gates: gateStore,
+  sessions: agentSessionStore,
+  events: runEventStore,
+  workspaces: workspaceService,
+  codex: codexClient,
+  codexExecution: {
+    approvalPolicy: config.approvalPolicy,
+    sandboxPolicy: buildSandboxPolicy(),
+    model: config.model,
+  },
+});
 
 function resolveActionPath(rawPath: string) {
   return path.isAbsolute(rawPath) ? rawPath : path.resolve(process.cwd(), rawPath);
@@ -435,6 +459,10 @@ async function listWorkflowDefinitions(): Promise<ListWorkflowDefinitionsRespons
 
 async function createWorkflowRun(request: CreateWorkflowRunRequest) {
   return await workflowRunService.createRun(request);
+}
+
+async function readWorkflowRun(runId: string) {
+  return await workflowRunService.readRunDetail(runId);
 }
 
 async function respondToApproval(args: {
@@ -675,11 +703,55 @@ app.post('/api/workflow-runs', async (req, res) => {
       tags: readStringArray(req.body?.tags),
       metadata: readStringMap(req.body?.metadata),
     });
-    res.status(201).json(result);
+    res.status(201).json({ detail: result });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to create workflow run.';
     const status = /not found/i.test(message) ? 404 : /invalid/i.test(message) ? 400 : 400;
     res.status(status).json({ error: 'workflow_run_create_failed', message });
+  }
+});
+
+app.get('/api/workflow-runs/:id', async (req, res) => {
+  try {
+    const detail = await readWorkflowRun(req.params.id);
+    if (!detail) {
+      res.status(404).json({
+        error: 'not_found',
+        message: `Workflow run "${req.params.id}" was not found.`,
+      });
+      return;
+    }
+
+    res.json({ detail });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to read workflow run.';
+    res.status(500).json({ error: 'workflow_run_read_failed', message });
+  }
+});
+
+app.post('/api/workflow-runs/:id/planning-message', async (req, res) => {
+  const message = readString(req.body?.message);
+  if (!message) {
+    res.status(400).json({ error: 'invalid_message', message: 'message is required.' });
+    return;
+  }
+
+  try {
+    const detail = await workflowRunService.sendPlanningMessage({
+      runId: req.params.id,
+      message,
+    });
+    res.json({ detail });
+  } catch (error) {
+    const messageText =
+      error instanceof Error ? error.message : 'Failed to send planning message.';
+    const status =
+      /not found/i.test(messageText)
+        ? 404
+        : /only allowed|missing|requires/i.test(messageText)
+          ? 409
+          : 400;
+    res.status(status).json({ error: 'workflow_planning_message_failed', message: messageText });
   }
 });
 

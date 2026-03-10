@@ -42,7 +42,7 @@ function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function normalizeCodexThread(result: unknown): CodexThread {
+export function normalizeCodexThread(result: unknown): CodexThread {
   if (!isObject(result) || !isObject(result.thread)) {
     throw new Error('Codex app-server returned an invalid thread response.');
   }

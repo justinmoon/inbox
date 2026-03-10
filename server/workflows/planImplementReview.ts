@@ -411,6 +411,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
         'Used during the planning conversation. The planner may stay in discussion or emit the first prompt candidate artifact.',
       used_in_state_ids: ['planning_conversation'],
       output_marker_ids: ['first_prompt_candidate'],
+      parser_hook_ids: ['parse_first_prompt_candidate'],
       render({ run }) {
         return [
           'You are the planner/reviewer for a workflow runtime with explicit user gates.',
@@ -440,6 +441,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
         'Used after implementation. The reviewer must choose one explicit verdict marker and include a fixup/replan body when required.',
       used_in_state_ids: ['auto_review'],
       output_marker_ids: ['review_accepted', 'review_fixup_required', 'review_replan_required'],
+      parser_hook_ids: ['parse_review_verdict'],
       render({ run }) {
         return [
           'You are reviewing the implementer output for this workflow run.',
@@ -466,6 +468,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
       description: 'Used after an accepted review to turn the finished step into a user-facing tutorial artifact.',
       used_in_state_ids: ['artifact_forking'],
       output_marker_ids: ['tutorial_artifact'],
+      parser_hook_ids: ['parse_tutorial_artifact'],
       render({ run }) {
         return [
           'Produce the user-facing tutorial artifact for the accepted implementation step.',
@@ -488,6 +491,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
         'Used after an accepted review to propose the next implementer prompt as an explicit artifact for user approval.',
       used_in_state_ids: ['artifact_forking'],
       output_marker_ids: ['next_prompt_artifact'],
+      parser_hook_ids: ['parse_next_prompt_artifact'],
       render({ run }) {
         return [
           'Produce the next implementer prompt for the workflow loop.',
@@ -511,6 +515,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
       description: 'Extracts the first implementer prompt candidate from planner output.',
       marker_ids: ['first_prompt_candidate'],
       output_kind: 'prompt_artifact',
+      transition_event: 'planner.prompt_ready',
       parse(text) {
         return firstMarkerContent(text, 'first_prompt_candidate');
       },
@@ -521,6 +526,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
       description: 'Extracts the review verdict and fixup/replan body using deterministic markers only.',
       marker_ids: ['review_accepted', 'review_fixup_required', 'review_replan_required'],
       output_kind: 'review_decision',
+      transition_event: null,
       parse(text) {
         if (reviewAcceptedMarker.parse(text).length > 0) {
           return { status: 'accepted', body: null };
@@ -545,6 +551,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
       description: 'Extracts the tutorial artifact body from the post-review forked output.',
       marker_ids: ['tutorial_artifact'],
       output_kind: 'artifact',
+      transition_event: null,
       parse(text) {
         return firstMarkerContent(text, 'tutorial_artifact');
       },
@@ -555,6 +562,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
       description: 'Extracts the next implementer prompt artifact from the post-review forked output.',
       marker_ids: ['next_prompt_artifact'],
       output_kind: 'artifact',
+      transition_event: null,
       parse(text) {
         return firstMarkerContent(text, 'next_prompt_artifact');
       },
