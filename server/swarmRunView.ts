@@ -12,6 +12,7 @@ import type {
   WorkflowRunSwarmView,
 } from '../shared/workflowRuntime.ts';
 import { SwarmDefinitionService } from './swarmDefinitionService.ts';
+import { resolveSwarmGateRuleRoute } from './swarms/index.ts';
 
 const swarmDefinitions = new SwarmDefinitionService();
 
@@ -82,6 +83,16 @@ function buildCurrentGate(
     null;
   const artifactKindId = rule?.artifact_kind_id ?? (gate.metadata.prompt_candidate ? 'prompt_candidate' : null);
   const artifactContent = gate.metadata.prompt_candidate ?? null;
+  const unlockedRoute =
+    rule != null
+      ? resolveSwarmGateRuleRoute(definition, rule)
+      : {
+          route: null,
+          target_agent_id: null,
+        };
+  const targetAgent = unlockedRoute.target_agent_id
+    ? definition.agents.find((agent) => agent.id === unlockedRoute.target_agent_id) ?? null
+    : null;
 
   return {
     gate_id: gate.id,
@@ -90,6 +101,10 @@ function buildCurrentGate(
     actor: gate.actor,
     rule_id: rule?.id ?? null,
     owner_agent_id: rule?.owner_agent_id ?? null,
+    unlocks_route_id: unlockedRoute.route?.id ?? null,
+    unlocks_route_title: unlockedRoute.route?.title ?? null,
+    unlocks_target_agent_id: unlockedRoute.target_agent_id,
+    unlocks_target_agent_title: targetAgent?.title ?? null,
     artifact:
       artifactKindId || artifactContent
         ? {
@@ -257,9 +272,13 @@ function renderRunSwarmMermaid(args: {
       lines.push(`  ${mermaidNodeId('agent', gateRule.owner_agent_id)} -. gate .-> ${gateNodeId}`);
     }
 
-    const plannerRoute = args.definition.allowed_routes[0] ?? null;
-    if (plannerRoute) {
-      lines.push(`  ${gateNodeId} -->|approve| ${mermaidNodeId('agent', plannerRoute.to_agent_id)}`);
+    if (args.currentGate.unlocks_target_agent_id) {
+      const approveLabel = args.currentGate.unlocks_route_title
+        ? `approve via ${args.currentGate.unlocks_route_title}`
+        : 'approve';
+      lines.push(
+        `  ${gateNodeId} -->|${escapeMermaidLabel(approveLabel)}| ${mermaidNodeId('agent', args.currentGate.unlocks_target_agent_id)}`,
+      );
     }
   }
 

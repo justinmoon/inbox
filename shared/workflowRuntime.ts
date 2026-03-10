@@ -244,6 +244,10 @@ export type SwarmAgentDefinitionView = {
   kind: SwarmAgentKind;
   owned_state_ids: string[];
   session_kinds: string[];
+  role_prompt: string;
+  operating_guidelines: string[];
+  target_artifact_kind_ids: string[];
+  target_gate_rule_ids: string[];
 };
 
 export type SwarmRouteView = {
@@ -261,6 +265,7 @@ export type SwarmGateRuleView = {
   owner_agent_id: string;
   workflow_gate_ids: string[];
   artifact_kind_id: string;
+  unlocks_route_id: string | null;
 };
 
 export type SwarmArtifactKindView = {
@@ -312,6 +317,10 @@ export type SwarmCurrentGateView = {
   actor: string;
   rule_id: string | null;
   owner_agent_id: string | null;
+  unlocks_route_id: string | null;
+  unlocks_route_title: string | null;
+  unlocks_target_agent_id: string | null;
+  unlocks_target_agent_title: string | null;
   artifact: SwarmGateArtifactView | null;
 };
 

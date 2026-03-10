@@ -71,7 +71,15 @@ function extractThreadId(result: unknown): string {
 }
 
 function extractTurnId(result: unknown): string {
-  if (!isObject(result) || !isObject(result.turn) || typeof result.turn.id !== 'string') {
+  if (!isObject(result)) {
+    throw new Error('Codex app-server returned an invalid turn response.');
+  }
+
+  if (typeof result.turnId === 'string') {
+    return result.turnId;
+  }
+
+  if (!isObject(result.turn) || typeof result.turn.id !== 'string') {
     throw new Error('Codex app-server returned an invalid turn response.');
   }
 
@@ -177,7 +185,7 @@ export class AppServerCodexClient implements CodexClient {
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timeout waiting for turn ${input.turnId} to complete.`));
-      }, input.timeoutMs ?? 60_000);
+      }, input.timeoutMs ?? 300_000);
 
       const listener = (message: AppServerMessage) => {
         if (message.method !== 'turn/completed') {

@@ -13,6 +13,15 @@ export const planImplementReviewSwarm = defineSwarm({
       kind: 'hub',
       owned_state_ids: ['planning_conversation', 'first_prompt_approval', 'auto_review', 'step_approval'],
       session_kinds: ['planning_conversation'],
+      role_prompt:
+        'You are the planner/reviewer hub for a workflow runtime with explicit user gates.',
+      operating_guidelines: [
+        'Drive the conversation toward a tightly scoped implementer step before opening a gate.',
+        'Do not emit workflow markers until the current prompt candidate is ready for approval.',
+        'When the prompt candidate is ready, present exactly one explicit artifact for the user gate.',
+      ],
+      target_artifact_kind_ids: ['prompt_candidate'],
+      target_gate_rule_ids: ['prompt_candidate_approval'],
     },
     {
       id: 'implementer',
@@ -21,6 +30,15 @@ export const planImplementReviewSwarm = defineSwarm({
       kind: 'worker',
       owned_state_ids: ['implementing', 'fixup_implementing'],
       session_kinds: ['implementing'],
+      role_prompt:
+        'You are the implementer worker for a hub-and-spoke swarm run. Execute the approved task directly in the workspace.',
+      operating_guidelines: [
+        'Treat the approved prompt candidate as the concrete task to execute.',
+        'Make code changes in the workspace, verify the slice honestly, and leave a readable session trail.',
+        'Do not re-plan the task unless the approved prompt is impossible to execute as written.',
+      ],
+      target_artifact_kind_ids: [],
+      target_gate_rule_ids: [],
     },
   ],
   allowed_routes: [
@@ -40,6 +58,7 @@ export const planImplementReviewSwarm = defineSwarm({
       owner_agent_id: 'planner',
       workflow_gate_ids: ['first_prompt_gate'],
       artifact_kind_id: 'prompt_candidate',
+      unlocks_route_id: 'planner_to_implementer',
     },
   ],
   artifact_kinds: [

@@ -767,6 +767,275 @@ async function assertExecutionWorkspacePersistence() {
   }
 }
 
+async function waitForWorkflowRunDetail(
+  runId: string,
+  predicate: (detail: Record<string, any>) => boolean,
+  description: string,
+  timeoutMs = 120_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastDetail: Record<string, any> | null = null;
+
+  while (Date.now() < deadline) {
+    const response = await getJson<{ detail: Record<string, any> }>(
+      `/api/workflow-runs/${encodeURIComponent(runId)}`,
+    );
+    lastDetail = response.detail;
+    if (predicate(response.detail)) {
+      return response.detail;
+    }
+    await delay(750);
+  }
+
+  throw new Error(
+    `Timed out waiting for workflow run ${runId} to ${description}. Last state: ${JSON.stringify(
+      {
+        current_state_id: lastDetail?.run?.current_state_id ?? null,
+        current_state_family: lastDetail?.run?.current_state_family ?? null,
+        swarm_top_level_state: lastDetail?.swarm?.top_level_state ?? null,
+        open_gate_ids:
+          lastDetail?.open_gates?.map((gate: Record<string, any>) => gate.id) ?? [],
+      },
+      null,
+      2,
+    )}`,
+  );
+}
+
+async function waitForWorkflowRunPath() {
+  const output = await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 20000;',
+      '  while (Date.now() < deadline) {',
+      "    const pathname = window.location.pathname;",
+      "    const runId = document.querySelector('[data-workflow-run-id]')?.getAttribute('data-workflow-run-id') ?? '';",
+      "    if (pathname.startsWith('/workflow-runs/') && runId) return runId;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Timed out waiting for workflow run detail route.');",
+      '})()',
+    ].join(' '),
+    true,
+  );
+
+  return readEvalString(output);
+}
+
+async function waitForWorkflowLiveUpdates() {
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 20000;',
+      '  while (Date.now() < deadline) {',
+      "    const mode = document.querySelector('[data-workflow-live-update-mode]')?.getAttribute('data-workflow-live-update-mode');",
+      "    if (mode === 'events' || mode === 'polling') return;",
+      '    await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      '  }',
+      "  throw new Error('Workflow run detail did not enable live updates.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function createWorkflowRunFromBrowser(args: { repoPath: string; goalPrompt: string }) {
+  await runBrowser(['open', `${baseUrl}/workflow-runs`]);
+  await runBrowser(['wait', '--text', 'Workflow Runtime']);
+  await browserEval(
+    [
+      '(async () => {',
+      "  if (!document.querySelector('[data-workflow-runtime-route=\"true\"]')) {",
+      "    throw new Error('Workflow runtime route shell did not render.');",
+      '  }',
+      `  const repoPath = ${JSON.stringify(args.repoPath)};`,
+      `  const goalPrompt = ${JSON.stringify(args.goalPrompt)};`,
+      "  const form = document.querySelector('[data-workflow-create-form=\"true\"]');",
+      "  const workflow = document.querySelector('[data-workflow-field=\"workflow-id\"]');",
+      "  const repo = document.querySelector('[data-workflow-field=\"repo-path\"]');",
+      "  const goal = document.querySelector('[data-workflow-field=\"goal-prompt\"]');",
+      "  const button = document.querySelector('[data-workflow-submit=\"create-run\"]');",
+      "  if (!(form instanceof HTMLFormElement) || !(workflow instanceof HTMLSelectElement) || !(repo instanceof HTMLInputElement) || !(goal instanceof HTMLTextAreaElement) || !(button instanceof HTMLButtonElement)) {",
+      "    throw new Error('Workflow run creation controls are missing.');",
+      '  }',
+      '  const setValue = (element, value) => {',
+      '    const prototype = element instanceof HTMLTextAreaElement',
+      '      ? HTMLTextAreaElement.prototype',
+      '      : element instanceof HTMLSelectElement',
+      '        ? HTMLSelectElement.prototype',
+      '        : HTMLInputElement.prototype;',
+      "    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');",
+      '    descriptor?.set?.call(element, value);',
+      "    element.dispatchEvent(new Event('input', { bubbles: true }));",
+      "    element.dispatchEvent(new Event('change', { bubbles: true }));",
+      '  };',
+      "  setValue(workflow, 'plan-implement-review');",
+      '  setValue(repo, repoPath);',
+      '  setValue(goal, goalPrompt);',
+      '  await new Promise((resolve) => window.setTimeout(resolve, 50));',
+      "  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));",
+      '})()',
+    ].join(' '),
+  );
+
+  return await waitForWorkflowRunPath();
+}
+
+async function sendWorkflowPlanningMessageFromBrowser(message: string) {
+  const output = await browserEval(
+    [
+      '(async () => {',
+      `  const message = ${JSON.stringify(message)};`,
+      "  if (document.querySelector('[data-workflow-primary-surface=\"approval_gate\"]')) {",
+      "    return 'already_at_gate';",
+      '  }',
+      "  const form = document.querySelector('[data-workflow-planning-form=\"true\"]');",
+      "  const input = document.querySelector('[data-workflow-planning-input=\"true\"]');",
+      "  const button = document.querySelector('[data-workflow-planning-send=\"true\"]');",
+      "  if (!(form instanceof HTMLFormElement) || !(input instanceof HTMLTextAreaElement) || !(button instanceof HTMLButtonElement)) {",
+      "    throw new Error('Planning conversation controls are missing on the workflow route.');",
+      '  }',
+      "  const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');",
+      '  descriptor?.set?.call(input, message);',
+      "  input.dispatchEvent(new Event('input', { bubbles: true }));",
+      "  input.dispatchEvent(new Event('change', { bubbles: true }));",
+      '  await new Promise((resolve) => window.setTimeout(resolve, 50));',
+      "  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));",
+      "  return 'sent';",
+      '})()',
+    ].join(' '),
+    true,
+  );
+
+  return readEvalString(output);
+}
+
+async function waitForWorkflowApprovalSurface(runId: string) {
+  await waitForWorkflowRunDetail(
+    runId,
+    (detail) =>
+      detail.run?.current_state_id === 'first_prompt_approval' &&
+      detail.swarm?.top_level_state === 'needs_user_input' &&
+      Array.isArray(detail.open_gates) &&
+      detail.open_gates.length > 0,
+    'reach the first prompt approval gate',
+  );
+
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 30000;',
+      '  while (Date.now() < deadline) {',
+      "    const surface = document.querySelector('[data-workflow-primary-surface=\"approval_gate\"]');",
+      "    const topLevel = document.querySelector('[data-swarm-top-level-state]')?.getAttribute('data-swarm-top-level-state');",
+      "    const gate = document.querySelector('[data-swarm-current-gate]');",
+      "    const artifact = document.querySelector('[data-workflow-gate-artifact=\"true\"] code')?.textContent?.trim() ?? '';",
+      "    const routeId = gate?.getAttribute('data-swarm-unlocks-route-id');",
+      "    const targetAgentId = gate?.getAttribute('data-swarm-unlocks-target-agent-id');",
+      "    if (surface && topLevel === 'needs_user_input' && artifact && routeId === 'planner_to_implementer' && targetAgentId === 'implementer') {",
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      '  }',
+      "  throw new Error('Workflow route did not reflect the approval gate state.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function approveWorkflowGateFromBrowser() {
+  await browserEval(
+    [
+      '(async () => {',
+      "  const button = document.querySelector('[data-workflow-gate-action=\"approve\"]');",
+      "  if (!(button instanceof HTMLButtonElement)) throw new Error('Approve gate button is missing.');",
+      '  button.click();',
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertWorkflowImplementingSurface(runId: string) {
+  await waitForWorkflowRunDetail(
+    runId,
+    (detail) =>
+      detail.run?.current_state_id === 'implementing' &&
+      detail.swarm?.top_level_state === 'working' &&
+      Array.isArray(detail.sessions) &&
+      detail.sessions.some(
+        (sessionDetail: Record<string, any>) =>
+          sessionDetail.session?.kind === 'implementing' &&
+          sessionDetail.session?.thread_id &&
+          sessionDetail.session?.active_turn_id,
+      ),
+    'enter implementing with an active implementer session',
+  );
+
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 30000;',
+      '  while (Date.now() < deadline) {',
+      "    const surface = document.querySelector('[data-workflow-primary-surface=\"background\"]');",
+      "    const topLevel = document.querySelector('[data-swarm-top-level-state]')?.getAttribute('data-swarm-top-level-state');",
+      "    const currentState = document.querySelector('[data-workflow-current-state]')?.getAttribute('data-workflow-current-state');",
+      "    const implementer = document.querySelector('[data-swarm-agent-id=\"implementer\"]')?.getAttribute('data-swarm-agent-status');",
+      "    const implementerSession = document.querySelector('[data-workflow-session-kind=\"implementing\"]');",
+      "    const timelineTitles = [...document.querySelectorAll('[data-workflow-timeline-entry]')].map((node) => node.getAttribute('data-workflow-timeline-entry'));",
+      "    if (surface && topLevel === 'working' && currentState === 'implementing' && implementer === 'working' && implementerSession && timelineTitles.includes('Gate answered') && timelineTitles.includes('Implementer turn started')) {",
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      '  }',
+      "  throw new Error('Workflow route did not reflect implementer execution honestly.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertWorkflowRuntimeRoute() {
+  const goalPrompt = [
+    'Tighten the hub-and-spoke workflow runtime in the smallest reviewable slice.',
+    'Do not inspect files or run commands yet; wait for one clarifying user message before drafting the first prompt candidate.',
+  ].join(' ');
+  const runId = await createWorkflowRunFromBrowser({
+    repoPath: process.cwd(),
+    goalPrompt,
+  });
+
+  await waitForWorkflowLiveUpdates();
+  await browserEval(
+    [
+      "if (!document.querySelector('[data-workflow-session-kind=\"planning_conversation\"]')) {",
+      "  throw new Error('Planner session card is missing on the workflow run page.');",
+      '}',
+      "if (!document.querySelector('[data-workflow-primary-surface=\"planning_conversation\"]')) {",
+      "  throw new Error('Expected the workflow route to start in the planning conversation.');",
+      '}',
+    ].join(' '),
+  );
+
+  await sendWorkflowPlanningMessageFromBrowser(
+    [
+      'Do not inspect files or run commands for this planning step.',
+      'Use one explicit first prompt candidate and emit exactly one <first_prompt_candidate>...</first_prompt_candidate> marker.',
+      'Keep it focused on the swarm gate-route mapping and workflow-runtime browser validation.',
+    ].join(' '),
+  );
+
+  await waitForWorkflowApprovalSurface(runId);
+  await browserEval(
+    [
+      "const gateText = document.querySelector('[data-workflow-gate-artifact=\"true\"] code')?.textContent ?? '';",
+      "if (!gateText.trim()) {",
+      "  throw new Error('Expected the approval gate artifact to contain a prompt candidate.');",
+      '}',
+    ].join(' '),
+  );
+
+  await approveWorkflowGateFromBrowser();
+  await assertWorkflowImplementingSurface(runId);
+}
+
 await fs.mkdir(importedRoot, { recursive: true });
 await fs.mkdir(runtimeRoot, { recursive: true });
 await runCommand('npx', ['agent-browser', 'install']);
@@ -943,6 +1212,7 @@ try {
   );
   assertIncludes(apiResponse, 'cu_validation_rollup_checkpoint', 'canonical packet id should come from API');
   assertIncludes(apiResponse, 'cu_dynamic_tutorial_fixture', 'fixture packet id should come from API');
+  await assertWorkflowRuntimeRoute();
 
   detectPageErrors(await runBrowser(['errors'], true));
 } finally {

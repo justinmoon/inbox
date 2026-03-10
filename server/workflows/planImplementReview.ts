@@ -1,4 +1,5 @@
 import { defineWorkflow, createBlockTagMarker, createSelfClosingTagMarker } from './runtime.ts';
+import { planImplementReviewSwarm } from '../swarms/planImplementReview.ts';
 
 function describeRepo(repoId: string | null, repoPath: string | null) {
   if (repoId && repoPath) {
@@ -78,6 +79,27 @@ const markers = [
 function firstMarkerContent(text: string, markerId: string) {
   const marker = markers.find((entry) => entry.id === markerId);
   return marker?.parse(text)[0]?.content ?? null;
+}
+
+const plannerAgent = planImplementReviewSwarm.agents.find((agent) => agent.id === 'planner');
+const promptCandidateGateRule = planImplementReviewSwarm.gate_rules.find(
+  (gateRule) => gateRule.id === 'prompt_candidate_approval',
+);
+const promptCandidateArtifact = planImplementReviewSwarm.artifact_kinds.find(
+  (artifactKind) => artifactKind.id === 'prompt_candidate',
+);
+
+if (!plannerAgent || !promptCandidateGateRule || !promptCandidateArtifact) {
+  throw new Error('plan-implement-review swarm definition is missing required agents or gate metadata.');
+}
+
+function renderAgentPolicyLines(agent: { role_prompt: string; operating_guidelines: string[] }) {
+  return [
+    agent.role_prompt,
+    '',
+    'Operating guidelines:',
+    ...agent.operating_guidelines.map((guideline) => `- ${guideline}`),
+  ];
 }
 
 export const planImplementReviewWorkflow = defineWorkflow({
@@ -414,13 +436,16 @@ export const planImplementReviewWorkflow = defineWorkflow({
       parser_hook_ids: ['parse_first_prompt_candidate'],
       render({ run }) {
         return [
-          'You are the planner/reviewer for a workflow runtime with explicit user gates.',
+          ...renderAgentPolicyLines(plannerAgent),
           '',
           'Goal:',
           run.goal_prompt,
           '',
           'Repository context:',
           describeRepo(run.repo.repo_id, run.repo.repo_path),
+          '',
+          `Current swarm target artifact: ${promptCandidateArtifact.title}.`,
+          `Current user gate target: ${promptCandidateGateRule.title}.`,
           '',
           'Stay in discussion with the user until the first implementer step is scoped tightly enough to execute.',
           'When the plan is not ready yet, keep the conversation focused and do not emit any workflow markers.',
@@ -444,6 +469,8 @@ export const planImplementReviewWorkflow = defineWorkflow({
       parser_hook_ids: ['parse_review_verdict'],
       render({ run }) {
         return [
+          ...renderAgentPolicyLines(plannerAgent),
+          '',
           'You are reviewing the implementer output for this workflow run.',
           '',
           'Goal:',
@@ -471,6 +498,8 @@ export const planImplementReviewWorkflow = defineWorkflow({
       parser_hook_ids: ['parse_tutorial_artifact'],
       render({ run }) {
         return [
+          ...renderAgentPolicyLines(plannerAgent),
+          '',
           'Produce the user-facing tutorial artifact for the accepted implementation step.',
           '',
           'Goal:',
@@ -494,6 +523,8 @@ export const planImplementReviewWorkflow = defineWorkflow({
       parser_hook_ids: ['parse_next_prompt_artifact'],
       render({ run }) {
         return [
+          ...renderAgentPolicyLines(plannerAgent),
+          '',
           'Produce the next implementer prompt for the workflow loop.',
           '',
           'Goal:',

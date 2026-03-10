@@ -676,3 +676,83 @@ The runtime still does not yet include:
 - a generic scheduler or second state machine for the swarm layer
 - peer-to-peer agent routing beyond the planner -> implementer spoke
 - explicit swarm modeling for tutorial or PR fork workers
+
+## Minimal Swarm Policy Layer
+
+The swarm layer now carries a small amount of real role policy in addition to labels:
+
+- `SwarmAgentDefinitionView`
+  - `role_prompt`
+  - `operating_guidelines`
+  - `target_artifact_kind_ids`
+  - `target_gate_rule_ids`
+- `SwarmGateRuleView`
+  - `unlocks_route_id`
+
+This is intentionally still a thin overlay rather than a second execution engine.
+
+Current usage:
+
+- the planner agent policy text now seeds the workflow planner/reviewer prompt functions
+- the implementer agent policy text now seeds the first implementer turn text after approval
+- the planner agent also declares which artifact and gate it is trying to produce:
+  - `prompt_candidate`
+  - `prompt_candidate_approval`
+
+This keeps higher-level programming intent in the swarm definition without moving execution truth out of the workflow runtime yet.
+
+## Gate To Route Mapping
+
+The swarm graph no longer guesses an approval edge from `allowed_routes[0]`.
+
+Instead:
+
+- the swarm gate rule explicitly names the route it unlocks with `unlocks_route_id`
+- the swarm runtime resolves that route to its target agent
+- the run swarm view exposes:
+  - `current_gate.unlocks_route_id`
+  - `current_gate.unlocks_route_title`
+  - `current_gate.unlocks_target_agent_id`
+  - `current_gate.unlocks_target_agent_title`
+
+For the current hub-and-spoke slice:
+
+- `prompt_candidate_approval`
+  - unlocks `planner_to_implementer`
+  - which targets `implementer`
+
+That mapping now drives both the Mermaid graph generation and the lightweight swarm overview on `/workflow-runs`.
+
+## What Still Stays In Workflow Runtime
+
+The detailed workflow runtime still remains the execution truth for:
+
+- explicit workflow states and transitions
+- actual Codex session/thread lifecycle
+- parser hooks and marker detection
+- run events and transition history
+- gate opening, gate answering, and transition application
+- implementer workspace/session creation
+
+The swarm layer is currently descriptive plus prompt/policy-bearing. It is not yet:
+
+- a scheduler
+- a peer routing engine
+- a replacement for the detailed workflow state machine
+- a full collapse of planner/reviewer/implementer behavior into one generic swarm policy model
+
+## Browser Validation Coverage
+
+`scripts/validateBrowser.ts` now treats the workflow-runtime route as a real browser surface.
+
+`just validate` now exercises:
+
+- `/workflow-runs`
+- creating a workflow run from the UI
+- the live planning conversation surface
+- planner feedback submission from the UI
+- asynchronous transition into `first_prompt_approval`
+- first-prompt approval into `implementing`
+- the swarm overview updating to show the implementer route/status
+
+This keeps the runtime route from drifting into an unvalidated developer-only path.

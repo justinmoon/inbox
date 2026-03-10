@@ -357,6 +357,19 @@ function waitForUpdate(service: WorkflowRunService, predicate: (update: Workflow
   });
 }
 
+function firstTurnUserMessageText(thread: CodexThread | null | undefined, turnId?: string) {
+  const turn = turnId ? thread?.turns.find((entry) => entry.id === turnId) : thread?.turns[0];
+  const item = turn?.items.find((entry) => entry.type === 'userMessage');
+  if (!item || item.type !== 'userMessage') {
+    return '';
+  }
+
+  const content = Array.isArray(item.content)
+    ? (item.content as Array<{ type?: string; text?: string }>)
+    : [];
+  return content.find((part) => part.type === 'text')?.text ?? '';
+}
+
 async function waitForNoActiveTurn(service: WorkflowRunService, runId: string) {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
@@ -438,6 +451,28 @@ test('run creation returns before planner turn completion', async () => {
     const completedDetail = await waitForNoActiveTurn(harness.service, detail.run.id);
     assert.equal(completedDetail.sessions[0]?.session.active_turn_id, null);
     assert.equal(completedDetail.sessions[0]?.session.latest_turn_id, 'turn_1');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('planner turn prompt consumes swarm policy text', async () => {
+  const harness = await createHarness([{ completion: 'manual' }]);
+
+  try {
+    const detail = await harness.service.createRun({
+      workflow_id: 'plan-implement-review',
+      repo_path: harness.repoPath,
+      goal_prompt: 'Build the workflow runtime.',
+    });
+
+    const plannerSession = detail.sessions.find((session) => session.session.kind === 'planning_conversation');
+    const plannerPrompt = firstTurnUserMessageText(plannerSession?.thread);
+
+    assert.match(plannerPrompt, /planner\/reviewer hub/i);
+    assert.match(plannerPrompt, /Operating guidelines:/);
+    assert.match(plannerPrompt, /Current swarm target artifact: Prompt Candidate\./);
+    assert.match(plannerPrompt, /Current user gate target: Prompt Candidate Approval\./);
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }
@@ -699,6 +734,31 @@ test('implementer workspace, session, and turn are created on approval', async (
         'readThread:thr_2',
       ],
     );
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('implementer turn prompt consumes swarm policy text', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created, gate } = await moveRunToFirstPromptApproval(harness);
+
+    const detail = await harness.service.answerGate({
+      runId: created.run.id,
+      gateId: gate.id,
+      optionId: 'approve',
+    });
+
+    const implementerSession = detail.sessions.find((session) => session.session.kind === 'implementing');
+    const implementerPrompt = firstTurnUserMessageText(implementerSession?.thread);
+
+    assert.match(implementerPrompt, /implementer worker for a hub-and-spoke swarm run/i);
+    assert.match(implementerPrompt, /Operating guidelines:/);
+    assert.match(implementerPrompt, /Workflow goal:/);
+    assert.match(implementerPrompt, /Approved prompt candidate:/);
+    assert.match(implementerPrompt, /Implement the runtime persistence and initial planner run path\./);
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }

@@ -19,6 +19,30 @@ export type SwarmDefinition = {
   artifact_kinds: SwarmArtifactKindView[];
 };
 
+export function getSwarmAgent(definition: SwarmDefinition, agentId: string) {
+  return definition.agents.find((agent) => agent.id === agentId) ?? null;
+}
+
+export function getSwarmRoute(definition: SwarmDefinition, routeId: string) {
+  return definition.allowed_routes.find((route) => route.id === routeId) ?? null;
+}
+
+export function getSwarmGateRule(definition: SwarmDefinition, gateRuleId: string) {
+  return definition.gate_rules.find((gateRule) => gateRule.id === gateRuleId) ?? null;
+}
+
+export function getSwarmArtifactKind(definition: SwarmDefinition, artifactKindId: string) {
+  return definition.artifact_kinds.find((artifactKind) => artifactKind.id === artifactKindId) ?? null;
+}
+
+export function resolveSwarmGateRuleRoute(definition: SwarmDefinition, gateRule: SwarmGateRuleView) {
+  const route = gateRule.unlocks_route_id ? getSwarmRoute(definition, gateRule.unlocks_route_id) : null;
+  return {
+    route,
+    target_agent_id: route?.to_agent_id ?? null,
+  };
+}
+
 function escapeMermaidLabel(value: string) {
   return value.replace(/"/g, '\\"');
 }
@@ -66,6 +90,15 @@ export function validateSwarmDefinition(definition: SwarmDefinition): SwarmDefin
       continue;
     }
     agentIds.add(agent.id);
+
+    if (!agent.role_prompt.trim()) {
+      issues.push({
+        level: 'error',
+        code: 'missing_agent_role_prompt',
+        message: `Agent "${agent.id}" is missing its role prompt text.`,
+        agent_id: agent.id,
+      });
+    }
   }
 
   if (hubAgents.length === 0) {
@@ -154,6 +187,16 @@ export function validateSwarmDefinition(definition: SwarmDefinition): SwarmDefin
       });
     }
 
+    if (gateRule.unlocks_route_id && !routeIds.has(gateRule.unlocks_route_id)) {
+      issues.push({
+        level: 'error',
+        code: 'unknown_gate_rule_route',
+        message: `Gate rule "${gateRule.id}" references unknown unlock route "${gateRule.unlocks_route_id}".`,
+        gate_rule_id: gateRule.id,
+        route_id: gateRule.unlocks_route_id,
+      });
+    }
+
     if (gateRule.workflow_gate_ids.length === 0) {
       issues.push({
         level: 'warning',
@@ -161,6 +204,32 @@ export function validateSwarmDefinition(definition: SwarmDefinition): SwarmDefin
         message: `Gate rule "${gateRule.id}" is not mapped to any workflow gate ids yet.`,
         gate_rule_id: gateRule.id,
       });
+    }
+  }
+
+  for (const agent of definition.agents) {
+    for (const artifactKindId of agent.target_artifact_kind_ids) {
+      if (!artifactKindIds.has(artifactKindId)) {
+        issues.push({
+          level: 'error',
+          code: 'unknown_agent_target_artifact_kind',
+          message: `Agent "${agent.id}" references unknown artifact kind "${artifactKindId}".`,
+          agent_id: agent.id,
+          artifact_kind_id: artifactKindId,
+        });
+      }
+    }
+
+    for (const gateRuleId of agent.target_gate_rule_ids) {
+      if (!gateRuleIds.has(gateRuleId)) {
+        issues.push({
+          level: 'error',
+          code: 'unknown_agent_target_gate_rule',
+          message: `Agent "${agent.id}" references unknown gate rule "${gateRuleId}".`,
+          agent_id: agent.id,
+          gate_rule_id: gateRuleId,
+        });
+      }
     }
   }
 
@@ -192,6 +261,13 @@ export function renderSwarmDefinitionMermaid(definition: SwarmDefinition) {
     lines.push(
       `  ${mermaidNodeId('agent', gateRule.owner_agent_id)} -. opens .-> ${gateNodeId}`,
     );
+
+    const resolved = resolveSwarmGateRuleRoute(definition, gateRule);
+    if (resolved.route) {
+      lines.push(
+        `  ${gateNodeId} -->|approve via ${escapeMermaidLabel(resolved.route.title)}| ${mermaidNodeId('agent', resolved.route.to_agent_id)}`,
+      );
+    }
   }
 
   return lines.join('\n');

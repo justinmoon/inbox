@@ -22,6 +22,7 @@ import type { CodexClient } from './codexClient.ts';
 import { GateStore } from './gateStore.ts';
 import { RunEventStore } from './runEventStore.ts';
 import { buildWorkflowRunSwarmView } from './swarmRunView.ts';
+import { SwarmDefinitionService } from './swarmDefinitionService.ts';
 import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
 import { WorkflowRunStore } from './workflowRunStore.ts';
 import {
@@ -118,6 +119,7 @@ export class WorkflowRunService {
   #gates: GateStore;
   #sessions: AgentSessionStore;
   #events: RunEventStore;
+  #swarms: SwarmDefinitionService;
   #workspaces: WorkflowWorkspaceResolver;
   #codex: CodexClient;
   #clock: Clock;
@@ -132,6 +134,7 @@ export class WorkflowRunService {
     gates: GateStore;
     sessions: AgentSessionStore;
     events: RunEventStore;
+    swarms?: SwarmDefinitionService;
     workspaces: WorkflowWorkspaceResolver;
     codex: CodexClient;
     codexExecution?: CodexExecutionOptions;
@@ -143,6 +146,7 @@ export class WorkflowRunService {
     this.#gates = args.gates;
     this.#sessions = args.sessions;
     this.#events = args.events;
+    this.#swarms = args.swarms ?? new SwarmDefinitionService();
     this.#workspaces = args.workspaces;
     this.#codex = args.codex;
     this.#codexExecution = args.codexExecution ?? {};
@@ -1075,6 +1079,11 @@ export class WorkflowRunService {
     let threadId: string | null = null;
 
     try {
+      const implementerPrompt = this.#buildImplementerTurnText({
+        workflowId: args.run.workflow_id,
+        promptCandidate,
+        goalPrompt: args.run.goal_prompt,
+      });
       const workspaceResult = planningSession?.workspace_id
         ? await this.#workspaces.createWorkspace({
             source_workspace_id: planningSession.workspace_id,
@@ -1157,7 +1166,7 @@ export class WorkflowRunService {
 
       const turn = await this.#codex.startTurn({
         threadId: session.thread_id,
-        text: promptCandidate,
+        text: implementerPrompt,
         cwd: session.cwd,
         ...this.#codexExecution,
       });
@@ -1485,5 +1494,31 @@ export class WorkflowRunService {
     }
 
     return event;
+  }
+
+  #buildImplementerTurnText(args: {
+    workflowId: string;
+    promptCandidate: string;
+    goalPrompt: string;
+  }) {
+    const swarm = this.#swarms.getDefinition(args.workflowId);
+    const implementer = swarm?.agents.find((agent) => agent.id === 'implementer') ?? null;
+
+    if (!implementer) {
+      return args.promptCandidate;
+    }
+
+    return [
+      implementer.role_prompt,
+      '',
+      'Operating guidelines:',
+      ...implementer.operating_guidelines.map((guideline) => `- ${guideline}`),
+      '',
+      'Workflow goal:',
+      args.goalPrompt,
+      '',
+      'Approved prompt candidate:',
+      args.promptCandidate,
+    ].join('\n');
   }
 }

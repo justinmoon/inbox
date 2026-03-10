@@ -182,11 +182,13 @@ test('swarm view derives current gate, agent status, and timeline from runtime r
   assert.equal(swarm?.definition.id, 'plan-implement-review');
   assert.equal(swarm?.top_level_state, 'needs_user_input');
   assert.equal(swarm?.current_gate?.artifact?.content, 'Implement the swarm summary view.');
+  assert.equal(swarm?.current_gate?.unlocks_route_id, 'planner_to_implementer');
+  assert.equal(swarm?.current_gate?.unlocks_target_agent_id, 'implementer');
   assert.equal(swarm?.agents.find((agent) => agent.agent_id === 'planner')?.status, 'waiting_on_user');
   assert.equal(swarm?.agents.find((agent) => agent.agent_id === 'implementer')?.status, 'idle');
   assert.deepEqual(
     swarm?.timeline.map((entry) => entry.title),
     ['Agent session started', 'Marker detected', 'Gate opened'],
   );
-  assert.equal(swarm?.graph_mermaid.includes('Approve the first prompt'), true);
+  assert.equal(swarm?.graph_mermaid.includes('approve via Planner delegates implementation'), true);
 });

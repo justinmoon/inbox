@@ -65,7 +65,13 @@ function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetai
   const { session, thread, load_error } = sessionDetail;
 
   return (
-    <article className="workflow-session-card">
+    <article
+      className="workflow-session-card"
+      data-workflow-session-kind={session.kind}
+      data-workflow-session-actor={session.actor}
+      data-workflow-session-status={session.status}
+      data-workflow-session-thread-id={session.thread_id}
+    >
       <header className="workflow-session-card-header">
         <div>
           <p className="workflow-card-kicker">{humanizeToken(session.kind)}</p>
@@ -153,7 +159,13 @@ function swarmAgentStatePillClass(value: SwarmRunAgentView['status']) {
 
 function SwarmAgentNode({ agent }: { agent: SwarmRunAgentView }) {
   return (
-    <article className={`workflow-swarm-node is-${agent.status}`}>
+    <article
+      className={`workflow-swarm-node is-${agent.status}`}
+      data-swarm-agent-id={agent.agent_id}
+      data-swarm-agent-kind={agent.kind}
+      data-swarm-agent-status={agent.status}
+      data-swarm-agent-thread-id={agent.thread_id ?? ''}
+    >
       <header>
         <p className="workflow-card-kicker">{humanizeToken(agent.kind)}</p>
         <span className={`workflow-state-pill ${swarmAgentStatePillClass(agent.status)}`}>
@@ -479,7 +491,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   function renderPrimarySurface() {
     if (!detail) {
       return (
-        <section className="workflow-panel workflow-panel-empty">
+        <section
+          className="workflow-panel workflow-panel-empty"
+          data-workflow-primary-surface="empty"
+        >
           <h2>Start a workflow run</h2>
           <p>Create a run from the form, or open one from the run list to inspect its live state.</p>
         </section>
@@ -488,7 +503,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
     if (detail.run.current_state_family === 'conversation') {
       return (
-        <section className="workflow-panel workflow-primary-panel">
+        <section
+          className="workflow-panel workflow-primary-panel"
+          data-workflow-primary-surface="planning_conversation"
+        >
           <header className="workflow-panel-header">
             <div>
               <p className="workflow-card-kicker">Planning Conversation</p>
@@ -510,10 +528,15 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
           {plannerSession?.thread ? <CodexThreadViewer thread={plannerSession.thread} /> : null}
 
-          <form className="workflow-composer" onSubmit={handlePlanningMessage}>
+          <form
+            className="workflow-composer"
+            data-workflow-planning-form="true"
+            onSubmit={handlePlanningMessage}
+          >
             <label className="workflow-field">
               <span>Send planner feedback</span>
               <textarea
+                data-workflow-planning-input="true"
                 value={planningMessage}
                 onChange={(event) => setPlanningMessage(event.target.value)}
                 placeholder="Clarify scope, constraints, or ask for a tighter first step."
@@ -523,6 +546,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
             <div className="workflow-action-row">
               <button
                 className="solid-button"
+                data-workflow-planning-send="true"
                 disabled={sendingPlanningMessage || !planningMessage.trim()}
                 type="submit"
               >
@@ -539,7 +563,11 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
       const approveOption = openApprovalGate.options.find((option) => option.id === 'approve') ?? null;
       const reviseOption = openApprovalGate.options.find((option) => option.id === 'revise') ?? null;
       return (
-        <section className="workflow-panel workflow-primary-panel">
+        <section
+          className="workflow-panel workflow-primary-panel"
+          data-workflow-primary-surface="approval_gate"
+          data-workflow-gate-id={openApprovalGate.id}
+        >
           <header className="workflow-panel-header">
             <div>
               <p className="workflow-card-kicker">Approval Gate</p>
@@ -550,7 +578,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
           <p>{openApprovalGate.description ?? 'Review the proposed first prompt before launching the implementer.'}</p>
 
-          <div className="workflow-approval-artifact">
+          <div className="workflow-approval-artifact" data-workflow-gate-artifact="true">
             <p className="workflow-card-kicker">Approved Artifact Candidate</p>
             <pre>
               <code>{promptCandidate ?? 'Prompt candidate unavailable.'}</code>
@@ -560,6 +588,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
           <label className="workflow-field">
             <span>Revision feedback</span>
             <textarea
+              data-workflow-revision-input="true"
               value={revisionMessage}
               onChange={(event) => setRevisionMessage(event.target.value)}
               placeholder="Tell the planner what to tighten or change before implementation."
@@ -570,6 +599,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
           <div className="workflow-action-row">
             <button
               className="solid-button"
+              data-workflow-gate-action="approve"
               disabled={answeringGate || !promptCandidate || !approveOption}
               onClick={() => void handleGateAction(approveOption?.id ?? 'approve')}
               type="button"
@@ -578,6 +608,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
             </button>
             <button
               className="ghost-button"
+              data-workflow-gate-action="revise"
               disabled={answeringGate || !revisionMessage.trim() || !reviseOption}
               onClick={() => void handleGateAction(reviseOption?.id ?? 'revise')}
               type="button"
@@ -590,7 +621,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
     }
 
     return (
-      <section className="workflow-panel workflow-primary-panel">
+      <section
+        className="workflow-panel workflow-primary-panel"
+        data-workflow-primary-surface="background"
+      >
         <header className="workflow-panel-header">
           <div>
             <p className="workflow-card-kicker">Runtime State</p>
@@ -608,7 +642,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   }
 
   return (
-    <div className="workflow-runtime-shell">
+    <div className="workflow-runtime-shell" data-workflow-runtime-route="true">
       <aside className="workflow-runtime-sidebar">
         <div className="workflow-runtime-sidebar-top">
           <a className="ghost-button workflow-back-link" href="/">
@@ -628,10 +662,18 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
             </div>
           </header>
 
-          <form className="workflow-create-form" onSubmit={handleCreateRun}>
+          <form
+            className="workflow-create-form"
+            data-workflow-create-form="true"
+            onSubmit={handleCreateRun}
+          >
             <label className="workflow-field">
               <span>Workflow</span>
-              <select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
+              <select
+                data-workflow-field="workflow-id"
+                value={workflowId}
+                onChange={(event) => setWorkflowId(event.target.value)}
+              >
                 {definitions.map((definition) => (
                   <option key={definition.id} value={definition.id}>
                     {definition.title}
@@ -643,6 +685,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
             <label className="workflow-field">
               <span>Repo path</span>
               <input
+                data-workflow-field="repo-path"
                 value={repoPath}
                 onChange={(event) => setRepoPath(event.target.value)}
                 placeholder="/Users/you/code/inbox"
@@ -653,6 +696,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
             <label className="workflow-field">
               <span>Goal prompt</span>
               <textarea
+                data-workflow-field="goal-prompt"
                 value={goalPrompt}
                 onChange={(event) => setGoalPrompt(event.target.value)}
                 placeholder="Describe the first workflow objective in one concrete paragraph."
@@ -662,6 +706,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
             <button
               className="solid-button"
+              data-workflow-submit="create-run"
               disabled={creatingRun || !workflowId || !repoPath.trim() || !goalPrompt.trim() || loadingDefinitions}
               type="submit"
             >
@@ -691,6 +736,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                 <button
                   key={run.id}
                   className={`workflow-run-list-item${isSelected ? ' is-selected' : ''}`}
+                  data-workflow-run-list-item={run.id}
                   onClick={() => onNavigate(`/workflow-runs/${encodeURIComponent(run.id)}`)}
                   type="button"
                 >
@@ -736,8 +782,14 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
         )}
 
         {detail ? (
-          <div className="workflow-runtime-grid">
-            <section className="workflow-panel workflow-swarm-panel">
+          <div className="workflow-runtime-grid" data-workflow-run-id={detail.run.id}>
+            <section
+              className="workflow-panel workflow-swarm-panel"
+              data-workflow-swarm-overview="true"
+              data-swarm-top-level-state={swarmView?.top_level_state ?? ''}
+              data-workflow-current-state={detail.run.current_state_id}
+              data-workflow-current-state-family={detail.run.current_state_family}
+            >
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Swarm Overview</p>
@@ -766,14 +818,32 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                     <div className="workflow-swarm-arrow">delegates</div>
                     {swarmView.current_gate ? (
                       <>
-                        <article className="workflow-swarm-gate">
+                        <article
+                          className="workflow-swarm-gate"
+                          data-swarm-current-gate={swarmView.current_gate.gate_id}
+                          data-swarm-current-gate-rule={swarmView.current_gate.rule_id ?? ''}
+                          data-swarm-unlocks-route-id={swarmView.current_gate.unlocks_route_id ?? ''}
+                          data-swarm-unlocks-target-agent-id={
+                            swarmView.current_gate.unlocks_target_agent_id ?? ''
+                          }
+                        >
                           <p className="workflow-card-kicker">Current Gate</p>
                           <h3>{swarmView.current_gate.title}</h3>
                           <p className="workflow-muted-copy">
                             {swarmView.current_gate.artifact?.title ?? 'Gate artifact'}
                           </p>
+                          {swarmView.current_gate.unlocks_target_agent_title ? (
+                            <p className="workflow-muted-copy">
+                              Approve unlocks {swarmView.current_gate.unlocks_route_title ?? 'the next route'} to{' '}
+                              {swarmView.current_gate.unlocks_target_agent_title}.
+                            </p>
+                          ) : null}
                         </article>
-                        <div className="workflow-swarm-arrow">approve</div>
+                        <div className="workflow-swarm-arrow">
+                          {swarmView.current_gate.unlocks_route_title
+                            ? `approve via ${swarmView.current_gate.unlocks_route_title}`
+                            : 'approve'}
+                        </div>
                       </>
                     ) : null}
                     {swarmView.agents[1] ? <SwarmAgentNode agent={swarmView.agents[1]} /> : null}
@@ -825,11 +895,17 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                 <div>
                   <dt>Live updates</dt>
                   <dd>
-                    {liveUpdates.mode === 'events'
-                      ? `SSE${liveUpdates.eventCount > 0 ? ` (${liveUpdates.eventCount})` : ''}`
-                      : liveUpdates.mode === 'polling'
-                        ? 'Polling'
-                        : 'Idle'}
+                    <span
+                      data-workflow-live-update-mode={liveUpdates.mode}
+                      data-workflow-live-update-count={String(liveUpdates.eventCount)}
+                      data-workflow-live-update-last-type={liveUpdates.lastType ?? ''}
+                    >
+                      {liveUpdates.mode === 'events'
+                        ? `SSE${liveUpdates.eventCount > 0 ? ` (${liveUpdates.eventCount})` : ''}`
+                        : liveUpdates.mode === 'polling'
+                          ? 'Polling'
+                          : 'Idle'}
+                    </span>
                   </dd>
                 </div>
               </dl>
@@ -842,7 +918,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               </div>
             </section>
 
-            <section className="workflow-panel">
+            <section className="workflow-panel" data-workflow-gate-panel="true">
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Gate Artifact</p>
@@ -851,13 +927,22 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               </header>
               {swarmView?.current_gate ? (
                 <div className="workflow-gate-list">
-                  <article className="workflow-gate-summary">
+                  <article
+                    className="workflow-gate-summary"
+                    data-workflow-current-gate={swarmView.current_gate.gate_id}
+                  >
                     <header>
                       <p className="workflow-card-kicker">{humanizeToken(swarmView.current_gate.status)}</p>
                       <h4>{swarmView.current_gate.title}</h4>
                     </header>
+                    {swarmView.current_gate.unlocks_target_agent_title ? (
+                      <p className="workflow-muted-copy">
+                        Unlocks {swarmView.current_gate.unlocks_route_title ?? 'the next route'} to{' '}
+                        {swarmView.current_gate.unlocks_target_agent_title}.
+                      </p>
+                    ) : null}
                     {swarmView.current_gate.artifact ? (
-                      <div className="workflow-approval-artifact">
+                      <div className="workflow-approval-artifact" data-workflow-gate-artifact="true">
                         <p className="workflow-card-kicker">{swarmView.current_gate.artifact.title}</p>
                         <pre>
                           <code>{swarmView.current_gate.artifact.content ?? 'Artifact content unavailable.'}</code>
@@ -879,7 +964,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel workflow-events-panel">
+            <section className="workflow-panel workflow-events-panel" data-workflow-timeline="true">
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Timeline</p>
@@ -889,7 +974,13 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               {swarmView ? (
                 <div className="workflow-event-list workflow-timeline-list">
                   {swarmView.timeline.map((entry) => (
-                    <TimelineCard key={entry.id} entry={entry} />
+                    <div
+                      key={entry.id}
+                      data-workflow-timeline-entry={entry.title}
+                      data-workflow-timeline-emphasis={entry.emphasis}
+                    >
+                      <TimelineCard entry={entry} />
+                    </div>
                   ))}
                 </div>
               ) : (
@@ -897,7 +988,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel workflow-sessions-panel">
+            <section className="workflow-panel workflow-sessions-panel" data-workflow-sessions-panel="true">
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Sessions</p>
