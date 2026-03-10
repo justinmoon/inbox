@@ -54,6 +54,11 @@ export class GateStore {
       .sort((a, b) => a.opened_at.localeCompare(b.opened_at));
   }
 
+  async getGate(id: string): Promise<GateRecord | null> {
+    const gates = await readJsonMap(this.#filePath, (value) => gateSchema.parse(value));
+    return gates[id] ?? null;
+  }
+
   async saveGate(gate: GateRecord): Promise<GateRecord> {
     const gates = await readJsonMap(this.#filePath, (value) => gateSchema.parse(value));
     gates[gate.id] = gateSchema.parse(gate);

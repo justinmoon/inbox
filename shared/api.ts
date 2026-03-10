@@ -349,6 +349,10 @@ export type CreateWorkflowRunResponse = {
   detail: WorkflowRunDetail;
 };
 
+export type ListWorkflowRunsResponse = {
+  runs: WorkflowRunRecord[];
+};
+
 export type WorkflowRunSessionDetail = {
   session: AgentSessionRecord;
   thread: CodexThread | null;
@@ -371,6 +375,15 @@ export type SendPlanningMessageRequest = {
 };
 
 export type SendPlanningMessageResponse = {
+  detail: WorkflowRunDetail;
+};
+
+export type AnswerWorkflowGateRequest = {
+  option_id: string;
+  message?: string;
+};
+
+export type AnswerWorkflowGateResponse = {
   detail: WorkflowRunDetail;
 };
 

@@ -2238,6 +2238,303 @@ body.is-resizing-replay {
   padding-left: 1.3rem;
 }
 
+.floating-workflow-button {
+  position: fixed;
+  right: 1.4rem;
+  bottom: 8.55rem;
+  z-index: 18;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.78rem 0.95rem;
+  border: 1px solid var(--button-help-border);
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--button-help-bg);
+  box-shadow: var(--button-help-shadow);
+  backdrop-filter: blur(12px);
+  text-decoration: none;
+}
+
+.workflow-runtime-shell {
+  display: grid;
+  grid-template-columns: minmax(21rem, 24rem) minmax(0, 1fr);
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, var(--body-accent-a), transparent 34%),
+    radial-gradient(circle at right center, var(--body-accent-b), transparent 26%),
+    linear-gradient(180deg, var(--body-gradient-start), var(--body-gradient-mid) 58%, var(--body-gradient-end));
+}
+
+.workflow-runtime-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 100vh;
+  padding: 1.3rem;
+  border-right: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, var(--surface-rail-start), var(--surface-rail-end)),
+    var(--surface-rail-card);
+}
+
+.workflow-runtime-sidebar-top,
+.workflow-panel-header,
+.workflow-session-card-header,
+.workflow-event-card header,
+.workflow-gate-summary header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.workflow-runtime-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.35rem;
+}
+
+.workflow-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1.15rem;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface-soft);
+  box-shadow: var(--shadow);
+}
+
+.workflow-panel-empty {
+  min-height: 14rem;
+  justify-content: center;
+}
+
+.workflow-card-kicker {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.workflow-panel h1,
+.workflow-panel h2,
+.workflow-panel h4,
+.workflow-runtime-sidebar h1 {
+  margin: 0.12rem 0 0;
+  font-family: var(--display);
+  letter-spacing: -0.03em;
+}
+
+.workflow-runtime-sidebar h1 {
+  font-size: 1.85rem;
+}
+
+.workflow-muted-copy {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+
+.workflow-create-form,
+.workflow-composer,
+.workflow-session-list,
+.workflow-run-list,
+.workflow-gate-list,
+.workflow-event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.workflow-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.workflow-field span {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.workflow-field input,
+.workflow-field textarea,
+.workflow-field select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 0.8rem 0.9rem;
+  color: var(--ink);
+  background: var(--surface-code);
+  font: inherit;
+}
+
+.workflow-field textarea {
+  resize: vertical;
+  min-height: 7rem;
+}
+
+.workflow-run-list-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.85rem;
+  width: 100%;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  color: inherit;
+  background: var(--surface-rail-card);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workflow-run-list-item:hover,
+.workflow-run-list-item.is-selected {
+  border-color: var(--border-strong);
+  background: var(--surface-rail-card-hover);
+}
+
+.workflow-run-list-item strong,
+.workflow-run-list-item span {
+  display: block;
+}
+
+.workflow-run-list-item span,
+.workflow-run-list-item-meta {
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.workflow-run-list-item-meta {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.45rem;
+}
+
+.workflow-session-pills,
+.workflow-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.workflow-state-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.34rem 0.72rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  line-height: 1;
+}
+
+.workflow-state-pill-amber {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+
+.workflow-state-pill-blue {
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.workflow-state-pill-green {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.workflow-state-pill-slate {
+  background: var(--slate-soft);
+  color: var(--slate-ink);
+}
+
+.workflow-approval-artifact,
+.workflow-goal-card,
+.workflow-gate-summary,
+.workflow-event-card,
+.workflow-session-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface-muted);
+}
+
+.workflow-approval-artifact pre,
+.workflow-goal-card pre,
+.workflow-mermaid-block {
+  margin: 0;
+  padding: 0.95rem 1rem;
+  border-radius: 18px;
+  background: var(--surface-code-strong);
+  color: var(--ink);
+  overflow: auto;
+}
+
+.workflow-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.workflow-sessions-panel,
+.workflow-events-panel {
+  grid-column: 1 / -1;
+}
+
+.workflow-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 0;
+}
+
+.workflow-meta-grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.workflow-meta-grid dt {
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.workflow-meta-grid dd {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.workflow-back-link {
+  align-self: flex-start;
+  text-decoration: none;
+}
+
+.workflow-event-card header span {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.workflow-event-card p,
+.workflow-gate-summary p,
+.workflow-panel p {
+  margin: 0;
+}
+
 .banner {
   display: flex;
   gap: 0.7rem;
@@ -2255,6 +2552,10 @@ body.is-resizing-replay {
 @media (max-width: 1240px) {
   .app-shell {
     grid-template-columns: 20rem minmax(0, 1fr);
+  }
+
+  .workflow-runtime-grid {
+    grid-template-columns: 1fr;
   }
 
   .splitter-column {
@@ -2310,6 +2611,30 @@ body.is-resizing-replay {
   .floating-help-button {
     right: 1rem;
     bottom: 1rem;
+  }
+
+  .floating-workflow-button {
+    right: 1rem;
+    bottom: 4.8rem;
+  }
+
+  .workflow-runtime-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-runtime-sidebar {
+    position: static;
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .workflow-runtime-main {
+    padding-top: 1rem;
+  }
+
+  .workflow-meta-grid {
+    grid-template-columns: 1fr;
   }
 
   .session-wall {

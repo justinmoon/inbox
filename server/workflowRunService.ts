@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   CodexThread,
   CodexThreadItem,
+  CreateWorkspaceResult,
   CreateWorkflowRunRequest,
   EnsureRepositoryResult,
   WorkflowRunDetail,
@@ -41,6 +42,19 @@ type WorkflowWorkspaceResolver = {
   }): Promise<EnsureRepositoryResult>;
   getRepository(id: string): Promise<RepositoryRecord | null>;
   getWorkspace(id: string): Promise<WorkspaceRecord | null>;
+  createWorkspace(request:
+    | {
+        repo_id: string;
+        name_hint?: string;
+        tags?: string[];
+        metadata?: Record<string, string>;
+      }
+    | {
+        source_workspace_id: string;
+        name_hint?: string;
+        tags?: string[];
+        metadata?: Record<string, string>;
+      }): Promise<CreateWorkspaceResult>;
 };
 
 type CodexExecutionOptions = {
@@ -140,6 +154,10 @@ export class WorkflowRunService {
     return () => {
       this.#listeners.delete(listener);
     };
+  }
+
+  async listRuns() {
+    return await this.#runs.listRuns();
   }
 
   async createRun(request: CreateWorkflowRunRequest): Promise<WorkflowRunDetail> {
@@ -271,6 +289,97 @@ export class WorkflowRunService {
     const detail = await this.readRunDetail(run.id);
     if (!detail) {
       throw new Error(`Workflow run "${run.id}" could not be reloaded after sending a planning message.`);
+    }
+    return detail;
+  }
+
+  async answerGate(args: {
+    runId: string;
+    gateId: string;
+    optionId: string;
+    message?: string;
+  }): Promise<WorkflowRunDetail> {
+    const gate = await this.#gates.getGate(args.gateId);
+    if (!gate || gate.run_id !== args.runId) {
+      throw new Error(`Workflow gate "${args.gateId}" was not found for run "${args.runId}".`);
+    }
+
+    if (gate.status !== 'open') {
+      throw new Error(`Workflow gate "${args.gateId}" is not open.`);
+    }
+
+    const run = await this.#requireRun(args.runId);
+    if (run.current_state_id !== gate.state_id || run.status !== 'active') {
+      throw new Error(`Workflow run "${args.runId}" is not currently waiting on gate "${args.gateId}".`);
+    }
+
+    const definition = this.#loadDefinitionOrThrow(run.workflow_id);
+    const option = gate.options.find((entry) => entry.id === args.optionId) ?? null;
+    if (!option) {
+      throw new Error(`Gate "${gate.id}" does not define option "${args.optionId}".`);
+    }
+
+    const transition = definition.transitions.find((entry) => entry.id === option.transition_id) ?? null;
+    if (!transition) {
+      throw new Error(`Transition "${option.transition_id}" for gate "${gate.id}" was not found.`);
+    }
+
+    const nextState = getWorkflowState(definition, transition.to);
+    if (!nextState) {
+      throw new Error(`Workflow "${definition.id}" is missing target state "${transition.to}".`);
+    }
+
+    if (nextState.family === 'conversation' && !(args.message && args.message.trim())) {
+      throw new Error(`Gate option "${args.optionId}" requires a follow-up message for the planner.`);
+    }
+
+    if (nextState.id === 'implementing' && !(gate.metadata.prompt_candidate?.trim())) {
+      throw new Error(`Gate "${gate.id}" is missing the approved prompt candidate required to launch implementing.`);
+    }
+
+    await this.#answerGateRecord({
+      run,
+      gate,
+      optionId: option.id,
+      message: args.message ?? null,
+    });
+
+    const transitionResult = await this.#transitionRun({
+      run,
+      transition,
+      metadata: stringMetadata({
+        gate_id: gate.id,
+        gate_option_id: option.id,
+      }),
+      gateMetadata:
+        transition.to === 'first_prompt_approval'
+          ? stringMetadata({
+              prompt_candidate: gate.metadata.prompt_candidate ?? null,
+              parser_hook_id: gate.metadata.parser_hook_id ?? null,
+            })
+          : {},
+    });
+
+    if (nextState.family === 'conversation') {
+      const detail = await this.sendPlanningMessage({
+        runId: run.id,
+        message: args.message!.trim(),
+      });
+      return detail;
+    }
+
+    if (nextState.id === 'implementing') {
+      await this.#launchImplementer({
+        run: transitionResult.run,
+        promptCandidate: gate.metadata.prompt_candidate ?? null,
+        sourceGate: gate,
+        selectedOptionId: option.id,
+      });
+    }
+
+    const detail = await this.readRunDetail(run.id);
+    if (!detail) {
+      throw new Error(`Workflow run "${run.id}" could not be reloaded after answering gate "${gate.id}".`);
     }
     return detail;
   }
@@ -768,61 +877,21 @@ export class WorkflowRunService {
         throw new Error(`Workflow "${definition.id}" is missing target state "${transition.to}".`);
       }
 
-      const openedGates = await this.#createGatesForState({
+      await this.#transitionRun({
         run,
-        state: nextState,
+        transition,
+        sessionId: session.id,
+        threadId: session.thread_id,
+        turnId: args.turnId,
         metadata: stringMetadata({
           prompt_candidate: promptCandidate,
           parser_hook_id: parserHook.id,
         }),
-      });
-
-      const updatedRun: WorkflowRunRecord = {
-        ...run,
-        status:
-          nextState.id === 'failed'
-            ? 'failed'
-            : nextState.terminal
-              ? 'completed'
-              : run.status,
-        current_state_id: nextState.id,
-        current_state_family: nextState.family,
-        open_gate_ids: openedGates.map((gate) => gate.id),
-        last_transition_id: transition.id,
-        updated_at: this.#clock(),
-        completed_at: nextState.terminal ? this.#clock() : run.completed_at,
-      };
-      await this.#runs.saveRun(updatedRun);
-
-      await this.#recordEvent({
-        run: updatedRun,
-        type: 'state_transition',
-        summary: `Run transitioned from ${transition.from} to ${transition.to}.`,
-        state_id: updatedRun.current_state_id,
-        from_state_id: transition.from,
-        to_state_id: transition.to,
-        transition_id: transition.id,
-        session_id: session.id,
-        thread_id: session.thread_id,
-        turn_id: args.turnId,
-        metadata: stringMetadata({
+        gateMetadata: stringMetadata({
           parser_hook_id: parserHook.id,
           prompt_candidate: promptCandidate,
         }),
       });
-
-      for (const gate of openedGates) {
-        await this.#recordEvent({
-          run: updatedRun,
-          type: 'gate_opened',
-          summary: `Gate "${gate.title}" opened for state "${nextState.id}".`,
-          state_id: nextState.id,
-          metadata: stringMetadata({
-            gate_id: gate.id,
-            definition_gate_id: gate.definition_gate_id,
-          }),
-        });
-      }
 
       return;
     }
@@ -836,6 +905,384 @@ export class WorkflowRunService {
       thread_id: session.thread_id,
       turn_id: args.turnId,
       metadata: {},
+    });
+  }
+
+  async #answerGateRecord(args: {
+    run: WorkflowRunRecord;
+    gate: GateRecord;
+    optionId: string;
+    message: string | null;
+  }) {
+    const now = this.#clock();
+    const relatedGates = (await this.#gates.listByRun(args.run.id)).filter(
+      (gate) => gate.state_id === args.gate.state_id && gate.status === 'open',
+    );
+
+    const answeredGate: GateRecord = {
+      ...args.gate,
+      status: 'answered',
+      answered_at: now,
+      closed_at: now,
+      metadata: {
+        ...args.gate.metadata,
+        ...stringMetadata({
+          selected_option_id: args.optionId,
+          answer_message: args.message,
+        }),
+      },
+    };
+    await this.#gates.saveGate(answeredGate);
+
+    await this.#recordEvent({
+      run: args.run,
+      type: 'gate_answered',
+      summary: `Gate "${answeredGate.title}" answered with option "${args.optionId}".`,
+      state_id: args.run.current_state_id,
+      metadata: stringMetadata({
+        gate_id: answeredGate.id,
+        selected_option_id: args.optionId,
+      }),
+    });
+
+    for (const gate of relatedGates) {
+      if (gate.id === answeredGate.id) {
+        continue;
+      }
+
+      const dismissedGate: GateRecord = {
+        ...gate,
+        status: 'dismissed',
+        closed_at: now,
+      };
+      await this.#gates.saveGate(dismissedGate);
+
+      await this.#recordEvent({
+        run: args.run,
+        type: 'gate_dismissed',
+        summary: `Gate "${dismissedGate.title}" was dismissed when state advanced.`,
+        state_id: args.run.current_state_id,
+        metadata: stringMetadata({ gate_id: dismissedGate.id }),
+      });
+    }
+
+    return answeredGate;
+  }
+
+  async #transitionRun(args: {
+    run: WorkflowRunRecord;
+    transition: { id: string; from: string; to: string; title: string; description: string };
+    metadata: Record<string, string>;
+    gateMetadata: Record<string, string>;
+    sessionId?: string | null;
+    threadId?: string | null;
+    turnId?: string | null;
+  }) {
+    if (args.run.current_state_id !== args.transition.from) {
+      throw new Error(
+        `Workflow run "${args.run.id}" is in "${args.run.current_state_id}" but transition "${args.transition.id}" starts at "${args.transition.from}".`,
+      );
+    }
+
+    const definition = this.#loadDefinitionOrThrow(args.run.workflow_id);
+    const nextState = getWorkflowState(definition, args.transition.to);
+    if (!nextState) {
+      throw new Error(`Workflow "${definition.id}" is missing target state "${args.transition.to}".`);
+    }
+
+    const openedGates = await this.#createGatesForState({
+      run: args.run,
+      state: nextState,
+      metadata: args.gateMetadata,
+    });
+
+    const completedAt = nextState.terminal ? this.#clock() : args.run.completed_at;
+    const updatedRun: WorkflowRunRecord = {
+      ...args.run,
+      status:
+        nextState.id === 'failed'
+          ? 'failed'
+          : nextState.terminal
+            ? 'completed'
+            : 'active',
+      current_state_id: nextState.id,
+      current_state_family: nextState.family,
+      open_gate_ids: openedGates.map((gate) => gate.id),
+      last_transition_id: args.transition.id,
+      updated_at: this.#clock(),
+      completed_at: completedAt,
+    };
+    await this.#runs.saveRun(updatedRun);
+
+    await this.#recordEvent({
+      run: updatedRun,
+      type: 'state_transition',
+      summary: `Run transitioned from ${args.transition.from} to ${args.transition.to}.`,
+      state_id: updatedRun.current_state_id,
+      from_state_id: args.transition.from,
+      to_state_id: args.transition.to,
+      transition_id: args.transition.id,
+      session_id: args.sessionId ?? null,
+      thread_id: args.threadId ?? null,
+      turn_id: args.turnId ?? null,
+      metadata: args.metadata,
+    });
+
+    for (const gate of openedGates) {
+      await this.#recordEvent({
+        run: updatedRun,
+        type: 'gate_opened',
+        summary: `Gate "${gate.title}" opened for state "${nextState.id}".`,
+        state_id: nextState.id,
+        metadata: stringMetadata({
+          gate_id: gate.id,
+          definition_gate_id: gate.definition_gate_id,
+        }),
+      });
+    }
+
+    return {
+      run: updatedRun,
+      nextState,
+      gates: openedGates,
+    };
+  }
+
+  async #launchImplementer(args: {
+    run: WorkflowRunRecord;
+    promptCandidate: string | null;
+    sourceGate: GateRecord;
+    selectedOptionId: string;
+  }) {
+    const promptCandidate = args.promptCandidate?.trim() ?? null;
+    if (!promptCandidate) {
+      throw new Error(`Gate "${args.sourceGate.id}" does not contain an approved prompt candidate.`);
+    }
+
+    const planningSession = await this.#loadPlanningSession(args.run.id);
+    if (!planningSession?.workspace_id && !args.run.repo.repo_id) {
+      throw new Error(`Workflow run "${args.run.id}" is missing workspace context for the implementer.`);
+    }
+
+    let session: AgentSessionRecord | null = null;
+    let threadId: string | null = null;
+
+    try {
+      const workspaceResult = planningSession?.workspace_id
+        ? await this.#workspaces.createWorkspace({
+            source_workspace_id: planningSession.workspace_id,
+            name_hint: `implementer-${args.run.id}`,
+            tags: ['workflow-runtime', 'implementer'],
+            metadata: stringMetadata({
+              run_id: args.run.id,
+              workflow_id: args.run.workflow_id,
+            }),
+          })
+        : await this.#workspaces.createWorkspace({
+            repo_id: args.run.repo.repo_id!,
+            name_hint: `implementer-${args.run.id}`,
+            tags: ['workflow-runtime', 'implementer'],
+            metadata: stringMetadata({
+              run_id: args.run.id,
+              workflow_id: args.run.workflow_id,
+            }),
+          });
+
+      await this.#recordEvent({
+        run: args.run,
+        type: 'implementer_workspace_created',
+        summary: 'Implementer workspace created from the approved first prompt.',
+        state_id: args.run.current_state_id,
+        metadata: stringMetadata({
+          workspace_id: workspaceResult.workspace.id,
+          repo_id: workspaceResult.repository.id,
+        }),
+      });
+
+      const thread = await this.#codex.startThread({
+        cwd: workspaceResult.workspace.path,
+        ...this.#codexExecution,
+        persistExtendedHistory: true,
+      });
+      threadId = thread.threadId;
+
+      const now = this.#clock();
+      session = {
+        id: createId('session', this.#idGenerator),
+        run_id: args.run.id,
+        workflow_id: args.run.workflow_id,
+        backend: 'codex',
+        kind: 'implementing',
+        actor: 'implementer',
+        state_id: 'implementing',
+        thread_id: thread.threadId,
+        workspace_id: workspaceResult.workspace.id,
+        cwd: workspaceResult.workspace.path,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        latest_turn_id: null,
+        latest_turn_completed_at: null,
+        last_turn_status: null,
+        status: 'active',
+        created_at: now,
+        updated_at: now,
+        tags: ['workflow-runtime', 'background'],
+        metadata: stringMetadata({
+          prompt_candidate: promptCandidate,
+          source_gate_id: args.sourceGate.id,
+          source_gate_option_id: args.selectedOptionId,
+        }),
+      };
+      await this.#sessions.saveSession(session);
+
+      await this.#recordEvent({
+        run: args.run,
+        type: 'implementer_session_started',
+        summary: 'Implementer session started from the approved first prompt.',
+        state_id: args.run.current_state_id,
+        session_id: session.id,
+        thread_id: session.thread_id,
+        metadata: stringMetadata({
+          workspace_id: workspaceResult.workspace.id,
+          source_gate_id: args.sourceGate.id,
+        }),
+      });
+
+      const turn = await this.#codex.startTurn({
+        threadId: session.thread_id,
+        text: promptCandidate,
+        cwd: session.cwd,
+        ...this.#codexExecution,
+      });
+
+      const updatedSession: AgentSessionRecord = {
+        ...session,
+        active_turn_id: turn.turnId,
+        active_turn_started_at: this.#clock(),
+        updated_at: this.#clock(),
+      };
+      await this.#sessions.saveSession(updatedSession);
+
+      await this.#recordEvent({
+        run: args.run,
+        type: 'implementer_turn_started',
+        summary: 'Implementer turn started from the approved first prompt.',
+        state_id: args.run.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: turn.turnId,
+        metadata: stringMetadata({
+          source_gate_id: args.sourceGate.id,
+          prompt_candidate: promptCandidate,
+        }),
+      });
+
+      this.#scheduleImplementerTurnWatcher({
+        runId: args.run.id,
+        sessionId: updatedSession.id,
+        turnId: turn.turnId,
+      });
+    } catch (error) {
+      await this.#transitionRunToFailed({
+        runId: args.run.id,
+        sessionId: session?.id ?? null,
+        threadId: threadId ?? session?.thread_id ?? null,
+        eventType: 'implementer_startup_failed',
+        summary: 'Implementer launch failed after first-prompt approval.',
+        error,
+        transitionEvent: 'implementer.failed',
+      });
+    }
+  }
+
+  #scheduleImplementerTurnWatcher(args: {
+    runId: string;
+    sessionId: string;
+    turnId: string;
+  }) {
+    const key = `${args.sessionId}:${args.turnId}`;
+    if (this.#turnTasks.has(key)) {
+      return;
+    }
+
+    const task = this.#waitForImplementerTurnCompletion(args)
+      .catch(async (error) => {
+        await this.#transitionRunToFailed({
+          runId: args.runId,
+          sessionId: args.sessionId,
+          turnId: args.turnId,
+          eventType: 'implementer_turn_failed',
+          summary: 'Implementer turn execution failed after starting.',
+          error,
+          transitionEvent: 'implementer.failed',
+        });
+      })
+      .finally(() => {
+        this.#turnTasks.delete(key);
+      });
+
+    this.#turnTasks.set(key, task);
+  }
+
+  async #waitForImplementerTurnCompletion(args: {
+    runId: string;
+    sessionId: string;
+    turnId: string;
+  }) {
+    const completion = await this.#codex.waitForTurnCompletion({
+      threadId: (await this.#requireSession(args.sessionId)).thread_id,
+      turnId: args.turnId,
+    });
+
+    const session = await this.#requireSession(args.sessionId);
+    const run = await this.#requireRun(args.runId);
+    const completedAt = this.#clock();
+    const updatedSession: AgentSessionRecord = {
+      ...session,
+      active_turn_id: session.active_turn_id === args.turnId ? null : session.active_turn_id,
+      active_turn_started_at: session.active_turn_id === args.turnId ? null : session.active_turn_started_at,
+      latest_turn_id: args.turnId,
+      latest_turn_completed_at: completedAt,
+      last_turn_status: normalizeTurnStatus(completion.status),
+      status: completion.status === 'completed' ? 'completed' : 'failed',
+      updated_at: completedAt,
+    };
+    await this.#sessions.saveSession(updatedSession);
+
+    if (completion.status !== 'completed') {
+      await this.#recordEvent({
+        run,
+        type: 'implementer_turn_failed',
+        summary: `Implementer turn finished with status "${completion.status}".`,
+        state_id: run.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: args.turnId,
+        metadata: stringMetadata({ status: completion.status }),
+      });
+
+      await this.#transitionRunToFailed({
+        runId: run.id,
+        sessionId: updatedSession.id,
+        threadId: updatedSession.thread_id,
+        turnId: args.turnId,
+        eventType: 'implementer_runtime_failed',
+        summary: `Implementer turn completed with status "${completion.status}".`,
+        error: new Error(`Implementer turn ${args.turnId} finished with status "${completion.status}".`),
+        transitionEvent: 'implementer.failed',
+      });
+      return;
+    }
+
+    await this.#recordEvent({
+      run,
+      type: 'implementer_turn_completed',
+      summary: 'Implementer turn completed. Reviewer execution is not wired yet.',
+      state_id: run.current_state_id,
+      session_id: updatedSession.id,
+      thread_id: updatedSession.thread_id,
+      turn_id: args.turnId,
+      metadata: stringMetadata({ status: completion.status }),
     });
   }
 
@@ -892,6 +1339,7 @@ export class WorkflowRunService {
     eventType: string;
     summary: string;
     error: unknown;
+    transitionEvent?: string;
   }) {
     const run = await this.#runs.getRun(args.runId);
     if (!run) {
@@ -922,7 +1370,7 @@ export class WorkflowRunService {
 
     const transition = findWorkflowTransition(definition, {
       fromStateId: run.current_state_id,
-      event: 'planner.abort',
+      event: args.transitionEvent ?? 'planner.abort',
     });
 
     const updatedRun: WorkflowRunRecord = {

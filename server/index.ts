@@ -12,6 +12,7 @@ import type {
   ExecuteNextActionResult,
   ListRepositoriesResponse,
   ListWorkflowDefinitionsResponse,
+  ListWorkflowRunsResponse,
   ListWorkspacesResponse,
   RespondApprovalResult,
   WorkflowRunStreamEvent,
@@ -484,8 +485,23 @@ async function createWorkflowRun(request: CreateWorkflowRunRequest) {
   return await workflowRunService.createRun(request);
 }
 
+async function listWorkflowRuns(): Promise<ListWorkflowRunsResponse> {
+  return {
+    runs: await workflowRunService.listRuns(),
+  };
+}
+
 async function readWorkflowRun(runId: string) {
   return await workflowRunService.readRunDetail(runId);
+}
+
+async function answerWorkflowGate(args: {
+  runId: string;
+  gateId: string;
+  optionId: string;
+  message?: string;
+}) {
+  return await workflowRunService.answerGate(args);
 }
 
 async function respondToApproval(args: {
@@ -734,6 +750,15 @@ app.post('/api/workflow-runs', async (req, res) => {
   }
 });
 
+app.get('/api/workflow-runs', async (_req, res) => {
+  try {
+    res.json(await listWorkflowRuns());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to list workflow runs.';
+    res.status(500).json({ error: 'workflow_run_list_failed', message });
+  }
+});
+
 app.get('/api/workflow-runs/:id', async (req, res) => {
   try {
     const detail = await readWorkflowRun(req.params.id);
@@ -749,6 +774,35 @@ app.get('/api/workflow-runs/:id', async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to read workflow run.';
     res.status(500).json({ error: 'workflow_run_read_failed', message });
+  }
+});
+
+app.post('/api/workflow-runs/:id/gates/:gateId/answer', async (req, res) => {
+  const optionId = readString(req.body?.option_id);
+  const message = readString(req.body?.message) ?? undefined;
+
+  if (!optionId) {
+    res.status(400).json({ error: 'invalid_option_id', message: 'option_id is required.' });
+    return;
+  }
+
+  try {
+    const detail = await answerWorkflowGate({
+      runId: req.params.id,
+      gateId: req.params.gateId,
+      optionId,
+      message,
+    });
+    res.json({ detail });
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : 'Failed to answer workflow gate.';
+    const status =
+      /not found/i.test(messageText)
+        ? 404
+        : /not open|waiting on gate|requires|missing|does not define option|is in/i.test(messageText)
+          ? 409
+          : 400;
+    res.status(status).json({ error: 'workflow_gate_answer_failed', message: messageText });
   }
 });
 

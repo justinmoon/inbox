@@ -220,6 +220,7 @@ class FakeCodexClient implements CodexClient {
 
 function createWorkspaceHarness(repoPath: string) {
   const timestamp = '2026-03-10T00:00:00.000Z';
+  const createdWorkspaces: WorkspaceRecord[] = [];
   const repository: RepositoryRecord = {
     id: 'sample-repo',
     provider: 'shared-store-worktree',
@@ -249,6 +250,7 @@ function createWorkspaceHarness(repoPath: string) {
   };
 
   return {
+    createdWorkspaces,
     repository,
     workspace,
     async ensureRepository(request: { id?: string; source: string }) {
@@ -265,7 +267,42 @@ function createWorkspaceHarness(repoPath: string) {
       return id === repository.id ? { ...repository } : null;
     },
     async getWorkspace(id: string) {
-      return id === workspace.id ? { ...workspace } : null;
+      if (id === workspace.id) {
+        return { ...workspace };
+      }
+
+      const created = createdWorkspaces.find((entry) => entry.id === id);
+      return created ? { ...created } : null;
+    },
+    async createWorkspace(request: {
+      repo_id?: string;
+      source_workspace_id?: string;
+      name_hint?: string;
+      tags?: string[];
+      metadata?: Record<string, string>;
+    }) {
+      const nextWorkspace: WorkspaceRecord = {
+        id: request.name_hint ?? 'sample-repo--child',
+        repo_id: request.repo_id ?? workspace.repo_id,
+        provider: 'shared-store-worktree',
+        strategy: 'shared-store-worktree',
+        name: request.name_hint ?? 'child',
+        path: path.join(repoPath, '.visible', request.name_hint ?? 'child'),
+        source_ref: request.source_workspace_id
+          ? { kind: 'workspace', workspace_id: request.source_workspace_id }
+          : { kind: 'branch', branch: 'main' },
+        current_head: 'abc123',
+        created_at: timestamp,
+        updated_at: timestamp,
+        tags: request.tags ?? [],
+        metadata: request.metadata ?? {},
+      };
+      createdWorkspaces.push(nextWorkspace);
+
+      return {
+        repository: { ...repository },
+        workspace: nextWorkspace,
+      };
     },
   };
 }
@@ -297,6 +334,7 @@ async function createHarness(turnPlans: TurnPlan[]) {
     repoPath,
     codex,
     service,
+    workspaces,
   };
 }
 
@@ -332,6 +370,37 @@ async function waitForNoActiveTurn(service: WorkflowRunService, runId: string) {
   throw new Error('Timed out waiting for planner turn to become idle.');
 }
 
+async function moveRunToFirstPromptApproval(harness: Awaited<ReturnType<typeof createHarness>>) {
+  const created = await harness.service.createRun({
+    workflow_id: 'plan-implement-review',
+    repo_path: harness.repoPath,
+    goal_prompt: 'Build the workflow runtime.',
+  });
+
+  const transitionUpdate = waitForUpdate(
+    harness.service,
+    (update) =>
+      update.run_id === created.run.id &&
+      update.event.type === 'state_transition' &&
+      update.event.to_state_id === 'first_prompt_approval',
+  );
+  harness.codex.completeTurn('turn_1', {
+    assistantText:
+      '<first_prompt_candidate>Implement the runtime persistence and initial planner run path.</first_prompt_candidate>',
+  });
+  await transitionUpdate;
+
+  const detail = await waitForNoActiveTurn(harness.service, created.run.id);
+  const gate = detail.open_gates[0];
+  assert.ok(gate, 'expected the first approval gate to be open');
+
+  return {
+    created,
+    detail,
+    gate,
+  };
+}
+
 test('run creation returns before planner turn completion', async () => {
   const harness = await createHarness([{ completion: 'manual' }]);
 
@@ -356,10 +425,15 @@ test('run creation returns before planner turn completion', async () => {
       harness.service,
       (update) => update.run_id === detail.run.id && update.event.type === 'planner_turn_completed',
     );
+    const markerMissingUpdate = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === detail.run.id && update.event.type === 'planner_marker_not_found',
+    );
     harness.codex.completeTurn('turn_1', {
       assistantText: 'Need a tighter scope before I propose the first prompt.',
     });
     await completionUpdate;
+    await markerMissingUpdate;
 
     const completedDetail = await waitForNoActiveTurn(harness.service, detail.run.id);
     assert.equal(completedDetail.sessions[0]?.session.active_turn_id, null);
@@ -518,6 +592,143 @@ test('initial approval gate opens correctly after an asynchronous planning trans
       detail.open_gates[0]?.metadata.prompt_candidate,
       'Implement asynchronous workflow-run SSE updates.',
     );
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('revising the first prompt returns to planning and sends real planner feedback', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created, gate } = await moveRunToFirstPromptApproval(harness);
+
+    harness.codex.calls = [];
+    const detail = await harness.service.answerGate({
+      runId: created.run.id,
+      gateId: gate.id,
+      optionId: 'revise',
+      message: 'Tighten the first step to persistence and SSE only.',
+    });
+
+    assert.equal(detail.run.current_state_id, 'planning_conversation');
+    assert.equal(detail.run.current_state_family, 'conversation');
+    assert.deepEqual(detail.open_gates, []);
+
+    const plannerSession = detail.sessions.find((session) => session.session.kind === 'planning_conversation');
+    assert.equal(plannerSession?.session.thread_id, 'thr_1');
+    assert.equal(plannerSession?.session.active_turn_id, 'turn_2');
+    assert.deepEqual(harness.codex.calls, [
+      'resumeThread:thr_1',
+      'startTurn:thr_1:turn_2',
+      'waitForTurnCompletion:thr_1:turn_2',
+      'readThread:thr_1',
+    ]);
+
+    const revisionTurn = plannerSession?.thread?.turns.find((turn) => turn.id === 'turn_2');
+    const userMessage = revisionTurn?.items.find((item) => item.type === 'userMessage');
+    assert.deepEqual(userMessage, {
+      type: 'userMessage',
+      id: 'turn_2-user',
+      content: [{ type: 'text', text: 'Tighten the first step to persistence and SSE only.' }],
+    });
+    assert.equal(detail.events.some((event) => event.type === 'gate_answered'), true);
+    assert.equal(detail.events.some((event) => event.type === 'planner_turn_started'), true);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('approving the first prompt transitions to implementing', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created, gate } = await moveRunToFirstPromptApproval(harness);
+
+    const detail = await harness.service.answerGate({
+      runId: created.run.id,
+      gateId: gate.id,
+      optionId: 'approve',
+    });
+
+    assert.equal(detail.run.current_state_id, 'implementing');
+    assert.equal(detail.run.current_state_family, 'background');
+    assert.equal(detail.open_gates.length, 0);
+    assert.equal(detail.run.last_transition_id, 'first_prompt_approve');
+    assert.equal(detail.events.some((event) => event.type === 'implementer_turn_started'), true);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('implementer workspace, session, and turn are created on approval', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created, gate } = await moveRunToFirstPromptApproval(harness);
+
+    harness.codex.calls = [];
+    const detail = await harness.service.answerGate({
+      runId: created.run.id,
+      gateId: gate.id,
+      optionId: 'approve',
+    });
+
+    assert.equal(harness.workspaces.createdWorkspaces.length, 1);
+    const implementerWorkspace = harness.workspaces.createdWorkspaces[0];
+    assert.ok(implementerWorkspace);
+    assert.equal(implementerWorkspace?.metadata.run_id, created.run.id);
+
+    const implementerSession = detail.sessions.find((session) => session.session.kind === 'implementing');
+    assert.equal(implementerSession?.session.workspace_id, implementerWorkspace?.id ?? null);
+    assert.equal(implementerSession?.session.thread_id, 'thr_2');
+    assert.equal(implementerSession?.session.active_turn_id, 'turn_2');
+    assert.equal(
+      implementerSession?.session.metadata.prompt_candidate,
+      'Implement the runtime persistence and initial planner run path.',
+    );
+    assert.deepEqual(
+      harness.codex.calls,
+      [
+        'startThread:thr_2',
+        'startTurn:thr_2:turn_2',
+        'waitForTurnCompletion:thr_2:turn_2',
+        'readThread:thr_1',
+        'readThread:thr_2',
+      ],
+    );
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('run detail reflects implementing state, sessions, gates, and events honestly after approval', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created, gate } = await moveRunToFirstPromptApproval(harness);
+
+    await harness.service.answerGate({
+      runId: created.run.id,
+      gateId: gate.id,
+      optionId: 'approve',
+    });
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    assert.ok(detail);
+    assert.equal(detail?.run.current_state_id, 'implementing');
+    assert.equal(detail?.open_gates.length, 0);
+    assert.deepEqual(
+      detail?.sessions.map((session) => session.session.kind),
+      ['planning_conversation', 'implementing'],
+    );
+    assert.equal(detail?.sessions[0]?.session.active_turn_id, null);
+    assert.equal(detail?.sessions[0]?.session.latest_turn_id, 'turn_1');
+    assert.equal(detail?.sessions[1]?.session.active_turn_id, 'turn_2');
+    assert.equal(detail?.events.some((event) => event.type === 'gate_answered'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'implementer_workspace_created'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'implementer_session_started'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'implementer_turn_started'), true);
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }

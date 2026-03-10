@@ -821,6 +821,10 @@ export function App() {
 
       {!sessionWallOpen ? (
         <>
+          <a className="ghost-button floating-workflow-button" href="/workflow-runs">
+            Workflow Runs
+          </a>
+
           <ThemeSwitcher
             activeThemeId={themeId}
             open={themePickerOpen}

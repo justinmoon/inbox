@@ -453,9 +453,11 @@ The current minimal API surface is:
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
 - `POST /api/workflow-runs`
+- `GET /api/workflow-runs`
 - `GET /api/workflow-runs/:id`
 - `GET /api/workflow-runs/:id/events`
 - `POST /api/workflow-runs/:id/planning-message`
+- `POST /api/workflow-runs/:id/gates/:gateId/answer`
 
 Workflow run creation and planning messages now start or steer planner work asynchronously. They no longer wait for the full planner turn to finish before responding.
 
@@ -465,15 +467,15 @@ This definition/runtime slice still intentionally does not yet include:
 
 - a workflow engine that advances runs through transitions
 - `Artifact` runtime objects
-- gate answering and transition application
 - live run graph generation from actual runtime state
 - a product UI centered on workflow runs instead of checkpoint bundles
 
 ## Current Executable Slice
 
-The current executable workflow slice now proves one real path:
+The current executable workflow slice now proves one real user path:
 
 - create a `plan-implement-review` run
+- inspect the run from a dedicated `/workflow-runs` route without replacing the checkpoint UI
 - start the planner/reviewer Codex thread
 - start the planner conversation prompt from the workflow definition without blocking the API response
 - accept follow-up user planning messages on the same thread
@@ -482,6 +484,10 @@ The current executable workflow slice now proves one real path:
 - parse the completed planner turn with the workflow-defined marker hook
 - transition from `planning_conversation` to `first_prompt_approval` when `<first_prompt_candidate>` appears
 - open the configured approval gate for `first_prompt_approval`
+- show that gate and the candidate prompt on the run detail page
+- answer the first approval gate generically with `option_id` plus an optional user message
+- on `revise`, close the approval gate honestly, transition back to `planning_conversation`, and send the user feedback into the same planner thread
+- on `approve`, transition into `implementing`, create the implementer workspace, create the implementer Codex session, and start the implementer turn from the approved prompt candidate
 - expose async run updates over SSE so clients can observe planner progress and state changes
 
 ## Additional Runtime Objects
@@ -558,13 +564,45 @@ The backend also exposes a narrow run-update path:
     - state changed
     - approval gate opened
 
-## Remaining Gaps Before Implementer Execution
+## Current Gate Answer Model
+
+The runtime now has a first generic gate-answer path:
+
+- gate answers are submitted as:
+  - `option_id`
+  - optional `message`
+- answering a gate:
+  - marks the selected gate as `answered`
+  - dismisses sibling open gates for the same state
+  - records `gate_answered` and `gate_dismissed` events
+  - applies the workflow-defined transition associated with the selected gate option
+- the first concrete gate behavior is:
+  - `approve`
+    - transition to `implementing`
+    - create implementer workspace/session/turn
+  - `revise`
+    - transition back to `planning_conversation`
+    - send the revision feedback into the live planner session
+
+## States Now Executable
+
+The currently executable states are:
+
+- `planning_conversation`
+  - live user-facing planner conversation
+- `first_prompt_approval`
+  - real user gate with approve/revise handling
+- `implementing`
+  - implementer workspace/session/turn launch only
+  - completion is recorded, but the workflow does not yet move into reviewer execution
+
+## Remaining Gaps Before Reviewer Loop
 
 The runtime still does not yet include:
 
-- the implementer session path
-- review execution and review-result transitions
+- transition from implementer completion into `auto_review`
+- reviewer session startup and reviewer-result transitions
 - artifact generation and post-review forks
-- gate answering and transition application from user approval states
+- later approval states beyond the first prompt gate
 - recovery logic for in-flight planner turns across server restarts
 - a workflow-run UI that replaces the checkpoint-first product flow
