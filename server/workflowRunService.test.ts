@@ -592,6 +592,8 @@ test('initial approval gate opens correctly after an asynchronous planning trans
       detail.open_gates[0]?.metadata.prompt_candidate,
       'Implement asynchronous workflow-run SSE updates.',
     );
+    assert.equal(detail.swarm?.top_level_state, 'needs_user_input');
+    assert.equal(detail.swarm?.current_gate?.artifact?.content, 'Implement asynchronous workflow-run SSE updates.');
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }
@@ -725,6 +727,9 @@ test('run detail reflects implementing state, sessions, gates, and events honest
     assert.equal(detail?.sessions[0]?.session.active_turn_id, null);
     assert.equal(detail?.sessions[0]?.session.latest_turn_id, 'turn_1');
     assert.equal(detail?.sessions[1]?.session.active_turn_id, 'turn_2');
+    assert.equal(detail?.swarm?.top_level_state, 'working');
+    assert.equal(detail?.swarm?.agents.find((agent) => agent.agent_id === 'implementer')?.status, 'working');
+    assert.equal(detail?.swarm?.timeline.some((entry) => entry.title === 'Implementer turn started'), true);
     assert.equal(detail?.events.some((event) => event.type === 'gate_answered'), true);
     assert.equal(detail?.events.some((event) => event.type === 'implementer_workspace_created'), true);
     assert.equal(detail?.events.some((event) => event.type === 'implementer_session_started'), true);

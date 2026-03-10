@@ -10,6 +10,10 @@ export const gateStatuses = ['open', 'answered', 'dismissed'] as const;
 export const gateKinds = ['approval', 'input_required'] as const;
 export const agentSessionStatuses = ['active', 'completed', 'failed'] as const;
 export const agentTurnStatuses = ['running', 'completed', 'failed', 'interrupted'] as const;
+export const swarmAgentKinds = ['hub', 'worker'] as const;
+export const swarmRunTopLevelStates = ['working', 'needs_user_input', 'failed', 'completed'] as const;
+export const swarmRunAgentStatuses = ['idle', 'working', 'waiting_on_user', 'failed'] as const;
+export const swarmTimelineEmphasis = ['session', 'turn', 'marker', 'gate', 'transition', 'system'] as const;
 
 export const workflowRepositoryInputSchema = z
   .object({
@@ -112,6 +116,10 @@ export type GateStatus = (typeof gateStatuses)[number];
 export type GateKind = (typeof gateKinds)[number];
 export type AgentSessionStatus = (typeof agentSessionStatuses)[number];
 export type AgentTurnStatus = (typeof agentTurnStatuses)[number];
+export type SwarmAgentKind = (typeof swarmAgentKinds)[number];
+export type SwarmRunTopLevelState = (typeof swarmRunTopLevelStates)[number];
+export type SwarmRunAgentStatus = (typeof swarmRunAgentStatuses)[number];
+export type SwarmTimelineEmphasis = (typeof swarmTimelineEmphasis)[number];
 
 export type WorkflowRepositoryInput = z.infer<typeof workflowRepositoryInputSchema>;
 export type GateOptionRecord = z.infer<typeof gateOptionSchema>;
@@ -212,4 +220,120 @@ export type WorkflowDefinitionDetail = WorkflowDefinitionSummary & {
   markers: WorkflowMarkerProtocolView[];
   parser_hooks: WorkflowParserHookView[];
   mermaid: string;
+};
+
+export type SwarmDefinitionValidationIssue = {
+  level: 'error' | 'warning';
+  code: string;
+  message: string;
+  agent_id?: string;
+  route_id?: string;
+  gate_rule_id?: string;
+  artifact_kind_id?: string;
+};
+
+export type SwarmDefinitionValidation = {
+  valid: boolean;
+  issues: SwarmDefinitionValidationIssue[];
+};
+
+export type SwarmAgentDefinitionView = {
+  id: string;
+  title: string;
+  summary: string;
+  kind: SwarmAgentKind;
+  owned_state_ids: string[];
+  session_kinds: string[];
+};
+
+export type SwarmRouteView = {
+  id: string;
+  from_agent_id: string;
+  to_agent_id: string;
+  title: string;
+  summary: string;
+};
+
+export type SwarmGateRuleView = {
+  id: string;
+  title: string;
+  summary: string;
+  owner_agent_id: string;
+  workflow_gate_ids: string[];
+  artifact_kind_id: string;
+};
+
+export type SwarmArtifactKindView = {
+  id: string;
+  title: string;
+  summary: string;
+};
+
+export type SwarmDefinitionSummary = {
+  id: string;
+  title: string;
+  summary: string;
+  agent_count: number;
+  route_count: number;
+  gate_rule_count: number;
+  artifact_kind_count: number;
+  validation: SwarmDefinitionValidation;
+};
+
+export type SwarmDefinitionDetail = SwarmDefinitionSummary & {
+  agents: SwarmAgentDefinitionView[];
+  allowed_routes: SwarmRouteView[];
+  gate_rules: SwarmGateRuleView[];
+  artifact_kinds: SwarmArtifactKindView[];
+  mermaid: string;
+};
+
+export type SwarmRunAgentView = {
+  agent_id: string;
+  title: string;
+  kind: SwarmAgentKind;
+  status: SwarmRunAgentStatus;
+  active_state_id: string | null;
+  session_id: string | null;
+  thread_id: string | null;
+  active_turn_id: string | null;
+};
+
+export type SwarmGateArtifactView = {
+  kind_id: string | null;
+  title: string;
+  content: string | null;
+};
+
+export type SwarmCurrentGateView = {
+  gate_id: string;
+  title: string;
+  status: GateStatus;
+  actor: string;
+  rule_id: string | null;
+  owner_agent_id: string | null;
+  artifact: SwarmGateArtifactView | null;
+};
+
+export type SwarmTimelineEntry = {
+  id: string;
+  event_id: string;
+  timestamp: string;
+  emphasis: SwarmTimelineEmphasis;
+  title: string;
+  summary: string;
+  agent_id: string | null;
+  session_id: string | null;
+  turn_id: string | null;
+};
+
+export type WorkflowRunSwarmView = {
+  definition: SwarmDefinitionSummary;
+  top_level_state: SwarmRunTopLevelState;
+  active_state_id: string;
+  active_state_family: WorkflowStateFamily;
+  current_gate: SwarmCurrentGateView | null;
+  agents: SwarmRunAgentView[];
+  timeline: SwarmTimelineEntry[];
+  graph_mermaid: string;
 };

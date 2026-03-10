@@ -21,6 +21,7 @@ import { AgentSessionStore } from './agentSessionStore.ts';
 import type { CodexClient } from './codexClient.ts';
 import { GateStore } from './gateStore.ts';
 import { RunEventStore } from './runEventStore.ts';
+import { buildWorkflowRunSwarmView } from './swarmRunView.ts';
 import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
 import { WorkflowRunStore } from './workflowRunStore.ts';
 import {
@@ -411,11 +412,17 @@ export class WorkflowRunService {
       }),
     );
 
-    return {
+    const detail = {
       run,
       sessions: sessionDetails,
       open_gates: openGates,
       events,
+      swarm: null,
+    };
+
+    return {
+      ...detail,
+      swarm: buildWorkflowRunSwarmView(detail),
     };
   }
 

@@ -119,6 +119,73 @@ When a run is in:
 - `terminal`
   - final summary/outcome should dominate
 
+## Current Swarm Overlay
+
+The runtime now also has a thin hub-and-spoke simplification layer on top of the existing workflow runtime.
+
+This layer does not drive execution.
+
+It only describes and projects the current runtime truth so the app can answer simpler questions first:
+
+- which agents are active
+- whether the run is just working or needs user input
+- what the current gate artifact is
+- what happened recently in chronological order
+
+The minimal swarm model is:
+
+- `SwarmDefinition`
+  - `id`
+  - `title`
+  - `summary`
+  - `agents`
+  - `allowed_routes`
+  - `gate_rules`
+  - `artifact_kinds`
+- `WorkflowRunSwarmView`
+  - `top_level_state`
+  - `active_state_id`
+  - `active_state_family`
+  - `current_gate`
+  - `agents`
+  - `timeline`
+  - `graph_mermaid`
+
+This is intentionally a projection layer, not a second workflow engine.
+
+## Top-Level Run State
+
+The app now derives a simpler top-level run state directly from current runtime truth:
+
+- `needs_user_input`
+  - the run has an open gate
+- `failed`
+  - the run is in the failed state or has failed status
+- `completed`
+  - the run has completed status
+- `working`
+  - everything else
+
+This is intentionally much simpler than the concrete workflow state graph.
+
+The detailed workflow state, sessions, events, and gates still exist underneath for observability and execution.
+
+## Current Hub-And-Spoke Definition
+
+The first concrete swarm definition is the current `plan-implement-review` flow, reframed as:
+
+- planner = hub
+- implementer = worker
+
+The current swarm definition says:
+
+- planner owns user conversation and prompt proposal
+- planner can delegate work to implementer
+- a user gate opens when the planner emits a prompt candidate
+- the current gate artifact is the prompt candidate
+
+Tutorial generation, PR forks, and the full review loop are intentionally not part of this first swarm slice.
+
 ## Core Runtime Objects
 
 These should be generic, not workflow-specific.
@@ -606,3 +673,6 @@ The runtime still does not yet include:
 - later approval states beyond the first prompt gate
 - recovery logic for in-flight planner turns across server restarts
 - a workflow-run UI that replaces the checkpoint-first product flow
+- a generic scheduler or second state machine for the swarm layer
+- peer-to-peer agent routing beyond the planner -> implementer spoke
+- explicit swarm modeling for tutorial or PR fork workers

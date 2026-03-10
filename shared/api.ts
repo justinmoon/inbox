@@ -13,6 +13,7 @@ import type {
   WorkflowDefinitionDetail,
   WorkflowDefinitionSummary,
   WorkflowRunRecord,
+  WorkflowRunSwarmView,
 } from './workflowRuntime.ts';
 
 export type ChangeUnitListItem = {
@@ -364,6 +365,7 @@ export type WorkflowRunDetail = {
   sessions: WorkflowRunSessionDetail[];
   open_gates: GateRecord[];
   events: RunEventRecord[];
+  swarm: WorkflowRunSwarmView | null;
 };
 
 export type ReadWorkflowRunResponse = {

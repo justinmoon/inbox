@@ -2453,6 +2453,11 @@ body.is-resizing-replay {
   color: var(--green-ink);
 }
 
+.workflow-state-pill-red {
+  background: var(--red-soft);
+  color: var(--red-ink);
+}
+
 .workflow-state-pill-slate {
   background: var(--slate-soft);
   color: var(--slate-ink);
@@ -2489,9 +2494,74 @@ body.is-resizing-replay {
   gap: 1rem;
 }
 
+.workflow-swarm-panel,
 .workflow-sessions-panel,
 .workflow-events-panel {
   grid-column: 1 / -1;
+}
+
+.workflow-swarm-graph {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 0.8fr) auto minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.workflow-swarm-node,
+.workflow-swarm-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 10rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface-muted);
+}
+
+.workflow-swarm-node.is-working {
+  border-color: var(--blue-soft);
+  background: var(--surface-cool);
+}
+
+.workflow-swarm-node.is-waiting_on_user,
+.workflow-swarm-gate {
+  border-color: var(--amber-soft);
+  background: var(--surface-warm);
+}
+
+.workflow-swarm-node.is-failed {
+  border-color: var(--red-soft);
+  background: var(--red-soft);
+}
+
+.workflow-swarm-node header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.workflow-swarm-node h3,
+.workflow-swarm-gate h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-family: var(--display);
+}
+
+.workflow-swarm-arrow {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+.workflow-timeline-list {
+  gap: 0.75rem;
+}
+
+.workflow-timeline-card {
+  background: var(--surface-soft);
 }
 
 .workflow-meta-grid {
@@ -2635,6 +2705,14 @@ body.is-resizing-replay {
 
   .workflow-meta-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workflow-swarm-graph {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-swarm-arrow {
+    justify-self: start;
   }
 
   .session-wall {

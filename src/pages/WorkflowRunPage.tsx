@@ -3,7 +3,8 @@ import { startTransition, useEffect, useMemo, useState, type FormEvent } from 'r
 import type { WorkflowRunDetail, WorkflowRunSessionDetail } from '../../shared/api.ts';
 import type {
   GateRecord,
-  WorkflowDefinitionDetail,
+  SwarmRunAgentView,
+  SwarmTimelineEntry,
   WorkflowDefinitionSummary,
   WorkflowRunRecord,
 } from '../../shared/workflowRuntime.ts';
@@ -12,7 +13,6 @@ import {
   RequestError,
   answerWorkflowGate,
   createWorkflowRun,
-  fetchWorkflowDefinition,
   fetchWorkflowDefinitions,
   fetchWorkflowRunDetail,
   fetchWorkflowRuns,
@@ -46,21 +46,11 @@ function readThemeId() {
   return window.localStorage.getItem(THEME_STORAGE_KEY) ?? 'tokyo-night';
 }
 
-function formatMetadata(metadata: Record<string, string>) {
-  const entries = Object.entries(metadata).filter(([, value]) => value);
-  if (entries.length === 0) {
-    return 'None';
-  }
-
-  return entries.map(([key, value]) => `${key}=${value}`).join(' • ');
-}
-
 function getWorkflowTitle(
   definitions: WorkflowDefinitionSummary[],
-  detail: WorkflowDefinitionDetail | null,
   workflowId: string,
 ) {
-  return detail?.title ?? definitions.find((entry) => entry.id === workflowId)?.title ?? workflowId;
+  return definitions.find((entry) => entry.id === workflowId)?.title ?? workflowId;
 }
 
 function findPlannerSession(detail: WorkflowRunDetail | null) {
@@ -135,11 +125,83 @@ function GateSummary({ gate }: { gate: GateRecord }) {
   );
 }
 
+function swarmStatePillClass(value: 'working' | 'needs_user_input' | 'failed' | 'completed') {
+  switch (value) {
+    case 'needs_user_input':
+      return 'workflow-state-pill-amber';
+    case 'failed':
+      return 'workflow-state-pill-red';
+    case 'completed':
+      return 'workflow-state-pill-green';
+    default:
+      return 'workflow-state-pill-blue';
+  }
+}
+
+function swarmAgentStatePillClass(value: SwarmRunAgentView['status']) {
+  switch (value) {
+    case 'waiting_on_user':
+      return 'workflow-state-pill-amber';
+    case 'failed':
+      return 'workflow-state-pill-red';
+    case 'idle':
+      return 'workflow-state-pill-slate';
+    default:
+      return 'workflow-state-pill-blue';
+  }
+}
+
+function SwarmAgentNode({ agent }: { agent: SwarmRunAgentView }) {
+  return (
+    <article className={`workflow-swarm-node is-${agent.status}`}>
+      <header>
+        <p className="workflow-card-kicker">{humanizeToken(agent.kind)}</p>
+        <span className={`workflow-state-pill ${swarmAgentStatePillClass(agent.status)}`}>
+          {humanizeToken(agent.status)}
+        </span>
+      </header>
+      <h3>{agent.title}</h3>
+      <p className="workflow-muted-copy">
+        {agent.active_state_id ? humanizeToken(agent.active_state_id) : 'Idle'}
+      </p>
+      <p className="workflow-muted-copy">
+        {agent.thread_id ? <code>{agent.thread_id}</code> : 'No session yet'}
+      </p>
+    </article>
+  );
+}
+
+function TimelineCard({ entry }: { entry: SwarmTimelineEntry }) {
+  const emphasisClass =
+    entry.emphasis === 'gate'
+      ? 'workflow-state-pill-amber'
+      : entry.emphasis === 'transition'
+        ? 'workflow-state-pill-green'
+        : entry.emphasis === 'marker'
+          ? 'workflow-state-pill-blue'
+          : 'workflow-state-pill-slate';
+
+  return (
+    <article className="workflow-event-card workflow-timeline-card">
+      <header>
+        <strong>{entry.title}</strong>
+        <span>{formatLongTimestamp(entry.timestamp)}</span>
+      </header>
+      <div className="workflow-session-pills">
+        <span className={`workflow-state-pill ${emphasisClass}`}>{humanizeToken(entry.emphasis)}</span>
+        {entry.agent_id ? (
+          <span className="workflow-state-pill workflow-state-pill-slate">{humanizeToken(entry.agent_id)}</span>
+        ) : null}
+      </div>
+      <p>{entry.summary}</p>
+    </article>
+  );
+}
+
 export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   const [definitions, setDefinitions] = useState<WorkflowDefinitionSummary[]>([]);
   const [runs, setRuns] = useState<WorkflowRunRecord[]>([]);
   const [detail, setDetail] = useState<WorkflowRunDetail | null>(null);
-  const [definitionDetail, setDefinitionDetail] = useState<WorkflowDefinitionDetail | null>(null);
   const [loadingDefinitions, setLoadingDefinitions] = useState(true);
   const [loadingRuns, setLoadingRuns] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -164,8 +226,9 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
   const plannerSession = useMemo(() => findPlannerSession(detail), [detail]);
   const openApprovalGate = useMemo(() => findOpenApprovalGate(detail), [detail]);
+  const swarmView = detail?.swarm ?? null;
   const workflowTitle = detail
-    ? getWorkflowTitle(definitions, definitionDetail, detail.run.workflow_id)
+    ? swarmView?.definition.title ?? getWorkflowTitle(definitions, detail.run.workflow_id)
     : workflowId;
 
   useEffect(() => {
@@ -186,7 +249,6 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   useEffect(() => {
     if (!runId) {
       setDetail(null);
-      setDefinitionDetail(null);
       return;
     }
 
@@ -198,21 +260,6 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
       onNavigate(`/workflow-runs/${encodeURIComponent(runs[0]!.id)}`, true);
     }
   }, [onNavigate, runId, runs]);
-
-  useEffect(() => {
-    if (!detail) {
-      setDefinitionDetail(null);
-      return;
-    }
-
-    void fetchWorkflowDefinition(detail.run.workflow_id)
-      .then((workflow) => {
-        setDefinitionDetail(workflow);
-      })
-      .catch((error) => {
-        setDetailError(error instanceof Error ? error.message : 'Failed to load workflow definition.');
-      });
-  }, [detail?.run.workflow_id]);
 
   useEffect(() => {
     if (!runId) {
@@ -637,7 +684,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
           <div className="workflow-run-list">
             {runs.map((run) => {
-              const title = getWorkflowTitle(definitions, null, run.workflow_id);
+              const title = getWorkflowTitle(definitions, run.workflow_id);
               const isSelected = run.id === runId;
 
               return (
@@ -690,6 +737,53 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
         {detail ? (
           <div className="workflow-runtime-grid">
+            <section className="workflow-panel workflow-swarm-panel">
+              <header className="workflow-panel-header">
+                <div>
+                  <p className="workflow-card-kicker">Swarm Overview</p>
+                  <h2>{swarmView?.definition.title ?? workflowTitle}</h2>
+                </div>
+                {swarmView ? (
+                  <span className={`workflow-state-pill ${swarmStatePillClass(swarmView.top_level_state)}`}>
+                    {humanizeToken(swarmView.top_level_state)}
+                  </span>
+                ) : null}
+              </header>
+
+              {swarmView ? (
+                <>
+                  <div className="workflow-session-pills">
+                    <span className="workflow-state-pill workflow-state-pill-slate">
+                      Active state: {humanizeToken(swarmView.active_state_id)}
+                    </span>
+                    <span className="workflow-state-pill workflow-state-pill-blue">
+                      {humanizeToken(swarmView.active_state_family)}
+                    </span>
+                  </div>
+
+                  <div className="workflow-swarm-graph">
+                    {swarmView.agents[0] ? <SwarmAgentNode agent={swarmView.agents[0]} /> : null}
+                    <div className="workflow-swarm-arrow">delegates</div>
+                    {swarmView.current_gate ? (
+                      <>
+                        <article className="workflow-swarm-gate">
+                          <p className="workflow-card-kicker">Current Gate</p>
+                          <h3>{swarmView.current_gate.title}</h3>
+                          <p className="workflow-muted-copy">
+                            {swarmView.current_gate.artifact?.title ?? 'Gate artifact'}
+                          </p>
+                        </article>
+                        <div className="workflow-swarm-arrow">approve</div>
+                      </>
+                    ) : null}
+                    {swarmView.agents[1] ? <SwarmAgentNode agent={swarmView.agents[1]} /> : null}
+                  </div>
+                </>
+              ) : (
+                <p className="workflow-muted-copy">No swarm mapping is available for this workflow run yet.</p>
+              )}
+            </section>
+
             <section className="workflow-panel">
               <header className="workflow-panel-header">
                 <div>
@@ -697,6 +791,11 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                   <h2>{workflowTitle}</h2>
                 </div>
                 <div className="workflow-session-pills">
+                  {swarmView ? (
+                    <span className={`workflow-state-pill ${swarmStatePillClass(swarmView.top_level_state)}`}>
+                      {humanizeToken(swarmView.top_level_state)}
+                    </span>
+                  ) : null}
                   <span className="workflow-state-pill workflow-state-pill-slate">
                     {humanizeToken(detail.run.status)}
                   </span>
@@ -746,11 +845,30 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
             <section className="workflow-panel">
               <header className="workflow-panel-header">
                 <div>
-                  <p className="workflow-card-kicker">Open Gates</p>
-                  <h2>Current user gates</h2>
+                  <p className="workflow-card-kicker">Gate Artifact</p>
+                  <h2>Current user gate</h2>
                 </div>
               </header>
-              {detail.open_gates.length === 0 ? (
+              {swarmView?.current_gate ? (
+                <div className="workflow-gate-list">
+                  <article className="workflow-gate-summary">
+                    <header>
+                      <p className="workflow-card-kicker">{humanizeToken(swarmView.current_gate.status)}</p>
+                      <h4>{swarmView.current_gate.title}</h4>
+                    </header>
+                    {swarmView.current_gate.artifact ? (
+                      <div className="workflow-approval-artifact">
+                        <p className="workflow-card-kicker">{swarmView.current_gate.artifact.title}</p>
+                        <pre>
+                          <code>{swarmView.current_gate.artifact.content ?? 'Artifact content unavailable.'}</code>
+                        </pre>
+                      </div>
+                    ) : (
+                      <p className="workflow-muted-copy">This gate is waiting on explicit user input.</p>
+                    )}
+                  </article>
+                </div>
+              ) : detail.open_gates.length === 0 ? (
                 <p className="workflow-muted-copy">No open gates in the current state.</p>
               ) : (
                 <div className="workflow-gate-list">
@@ -761,16 +879,22 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel workflow-graph-panel">
+            <section className="workflow-panel workflow-events-panel">
               <header className="workflow-panel-header">
                 <div>
-                  <p className="workflow-card-kicker">Definition Graph</p>
-                  <h2>State graph</h2>
+                  <p className="workflow-card-kicker">Timeline</p>
+                  <h2>What the swarm did</h2>
                 </div>
               </header>
-              <pre className="workflow-mermaid-block">
-                <code>{definitionDetail?.mermaid ?? 'Loading Mermaid state diagram…'}</code>
-              </pre>
+              {swarmView ? (
+                <div className="workflow-event-list workflow-timeline-list">
+                  {swarmView.timeline.map((entry) => (
+                    <TimelineCard key={entry.id} entry={entry} />
+                  ))}
+                </div>
+              ) : (
+                <p className="workflow-muted-copy">Timeline data will appear here when the run has a swarm view.</p>
+              )}
             </section>
 
             <section className="workflow-panel workflow-sessions-panel">
@@ -783,27 +907,6 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               <div className="workflow-session-list">
                 {detail.sessions.map((sessionDetail) => (
                   <SessionCard key={sessionDetail.session.id} sessionDetail={sessionDetail} />
-                ))}
-              </div>
-            </section>
-
-            <section className="workflow-panel workflow-events-panel">
-              <header className="workflow-panel-header">
-                <div>
-                  <p className="workflow-card-kicker">Runtime Events</p>
-                  <h2>What happened</h2>
-                </div>
-              </header>
-              <div className="workflow-event-list">
-                {[...detail.events].reverse().map((event) => (
-                  <article key={event.id} className="workflow-event-card">
-                    <header>
-                      <strong>{humanizeToken(event.type)}</strong>
-                      <span>{formatLongTimestamp(event.created_at)}</span>
-                    </header>
-                    <p>{event.summary}</p>
-                    <p className="workflow-muted-copy">{formatMetadata(event.metadata)}</p>
-                  </article>
                 ))}
               </div>
             </section>
