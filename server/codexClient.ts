@@ -30,6 +30,12 @@ type StartTurnInput = {
   model?: string | null;
 };
 
+type SteerTurnInput = {
+  threadId: string;
+  turnId: string;
+  text: string;
+};
+
 type WaitForTurnCompletionInput = {
   threadId: string;
   turnId: string;
@@ -43,6 +49,7 @@ export interface CodexClient {
   startThread(input: StartThreadInput): Promise<{ threadId: string }>;
   resumeThread(input: ResumeThreadInput): Promise<{ threadId: string }>;
   startTurn(input: StartTurnInput): Promise<{ turnId: string }>;
+  steerTurn(input: SteerTurnInput): Promise<{ turnId: string }>;
   waitForTurnCompletion(input: WaitForTurnCompletionInput): Promise<{ turnId: string; status: string }>;
   readThread(input: { threadId: string; includeTurns?: boolean }): Promise<CodexThread>;
   onNotification(listener: ThreadNotificationListener): () => void;
@@ -147,6 +154,17 @@ export class AppServerCodexClient implements CodexClient {
       approvalPolicy: input.approvalPolicy ?? undefined,
       sandboxPolicy: input.sandboxPolicy ?? undefined,
       model: input.model ?? undefined,
+    });
+
+    return { turnId: extractTurnId(result) };
+  }
+
+  async steerTurn(input: SteerTurnInput) {
+    await this.ensureStarted();
+    const result = await this.#process.request('turn/steer', {
+      threadId: input.threadId,
+      expectedTurnId: input.turnId,
+      input: [{ type: 'text', text: input.text, textElements: [] }],
     });
 
     return { turnId: extractTurnId(result) };

@@ -453,19 +453,18 @@ The current minimal API surface is:
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
 - `POST /api/workflow-runs`
+- `GET /api/workflow-runs/:id`
+- `GET /api/workflow-runs/:id/events`
+- `POST /api/workflow-runs/:id/planning-message`
 
-The run-creation endpoint currently creates a persisted run in its initial state and opens any gates attached to that initial state. It does not yet start Codex sessions or move the run forward.
+Workflow run creation and planning messages now start or steer planner work asynchronously. They no longer wait for the full planner turn to finish before responding.
 
 ## Still Missing Before Real Workflow Execution
 
-This first slice intentionally does not yet include:
+This definition/runtime slice still intentionally does not yet include:
 
 - a workflow engine that advances runs through transitions
-- persisted runtime events or transition history
-- `AgentSession` and `Artifact` runtime objects
-- a Codex client boundary wired into workflow execution
-- automatic prompt dispatch
-- parser-hook execution against real Codex outputs
+- `Artifact` runtime objects
 - gate answering and transition application
 - live run graph generation from actual runtime state
 - a product UI centered on workflow runs instead of checkpoint bundles
@@ -476,11 +475,14 @@ The current executable workflow slice now proves one real path:
 
 - create a `plan-implement-review` run
 - start the planner/reviewer Codex thread
-- run the planner conversation prompt from the workflow definition
+- start the planner conversation prompt from the workflow definition without blocking the API response
 - accept follow-up user planning messages on the same thread
+- steer those messages into an already active planner turn when one exists
+- persist planner-turn started/completed/failed events
 - parse the completed planner turn with the workflow-defined marker hook
 - transition from `planning_conversation` to `first_prompt_approval` when `<first_prompt_candidate>` appears
 - open the configured approval gate for `first_prompt_approval`
+- expose async run updates over SSE so clients can observe planner progress and state changes
 
 ## Additional Runtime Objects
 
@@ -494,7 +496,11 @@ The runtime now also persists:
     - `actor`
     - `workspace_id`
     - `cwd`
+    - `active_turn_id`
+    - `active_turn_started_at`
     - `latest_turn_id`
+    - `latest_turn_completed_at`
+    - `last_turn_status`
     - `status`
 - `RunEventRecord`
   - enough to know what happened to a run and when
@@ -523,10 +529,34 @@ The current boundary supports:
 - `startThread`
 - `resumeThread`
 - `startTurn`
+- `steerTurn`
 - `waitForTurnCompletion`
 - `readThread`
 
-This is enough for the planning-conversation slice and keeps the workflow runtime detached from transport details.
+This is enough for the live `planning_conversation` slice and keeps the workflow runtime detached from transport details.
+
+## Current Async Planner Lifecycle
+
+For the planner/reviewer session, the runtime now persists and exposes these honest lifecycle points:
+
+- `planner_turn_started`
+- `planner_turn_steered`
+- `planner_turn_completed`
+- `planner_turn_failed`
+- `planner_marker_detected`
+- `planner_marker_not_found`
+- `state_transition`
+- `gate_opened`
+
+The backend also exposes a narrow run-update path:
+
+- `GET /api/workflow-runs/:id/events`
+  - SSE stream of persisted runtime events for that run
+  - enough for a client to show:
+    - planner is thinking
+    - planner completed
+    - state changed
+    - approval gate opened
 
 ## Remaining Gaps Before Implementer Execution
 
@@ -536,5 +566,5 @@ The runtime still does not yet include:
 - review execution and review-result transitions
 - artifact generation and post-review forks
 - gate answering and transition application from user approval states
-- a reusable event-driven engine for all workflow states
+- recovery logic for in-flight planner turns across server restarts
 - a workflow-run UI that replaces the checkpoint-first product flow

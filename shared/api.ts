@@ -373,3 +373,18 @@ export type SendPlanningMessageRequest = {
 export type SendPlanningMessageResponse = {
   detail: WorkflowRunDetail;
 };
+
+export type WorkflowRunStreamEvent =
+  | {
+      method: 'workflow-run/connected';
+      params: {
+        runId: string;
+      };
+    }
+  | {
+      method: 'workflow-run/event';
+      params: {
+        runId: string;
+        event: RunEventRecord;
+      };
+    };

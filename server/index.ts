@@ -14,6 +14,7 @@ import type {
   ListWorkflowDefinitionsResponse,
   ListWorkspacesResponse,
   RespondApprovalResult,
+  WorkflowRunStreamEvent,
 } from '../shared/api.ts';
 import { revisionRefSchema } from '../shared/workspaces.ts';
 import { getChangeUnitDetail, listChangeUnits } from './changeUnits.ts';
@@ -47,6 +48,7 @@ const gateStore = new GateStore(config.runtimeRoot);
 const agentSessionStore = new AgentSessionStore(config.runtimeRoot);
 const runEventStore = new RunEventStore(config.runtimeRoot);
 const liveSessionSubscribers = new Map<string, Set<express.Response>>();
+const workflowRunSubscribers = new Map<string, Set<express.Response>>();
 const liveApprovalStore = new LiveApprovalStore();
 
 let appServerReady: Promise<void> | null = null;
@@ -162,6 +164,17 @@ function broadcastLiveSessionMessage(threadId: string, method: string, params: u
   broadcastLiveSessionEvent(threadId, { method, params });
 }
 
+function broadcastWorkflowRunMessage(event: WorkflowRunStreamEvent) {
+  const runId = event.params.runId;
+  const subscribers = workflowRunSubscribers.get(runId);
+  if (!subscribers || subscribers.size === 0) return;
+
+  const payload = JSON.stringify(event);
+  for (const response of subscribers) {
+    response.write(`data: ${payload}\n\n`);
+  }
+}
+
 async function ensureAppServerStarted() {
   if (appServer.running) return;
   if (!appServerReady) {
@@ -232,6 +245,16 @@ const workflowRunService = new WorkflowRunService({
     sandboxPolicy: buildSandboxPolicy(),
     model: config.model,
   },
+});
+
+workflowRunService.subscribe((update) => {
+  broadcastWorkflowRunMessage({
+    method: 'workflow-run/event',
+    params: {
+      runId: update.run_id,
+      event: update.event,
+    },
+  });
 });
 
 function resolveActionPath(rawPath: string) {
@@ -727,6 +750,54 @@ app.get('/api/workflow-runs/:id', async (req, res) => {
     const message = error instanceof Error ? error.message : 'Failed to read workflow run.';
     res.status(500).json({ error: 'workflow_run_read_failed', message });
   }
+});
+
+app.get('/api/workflow-runs/:id/events', async (req, res) => {
+  try {
+    const detail = await readWorkflowRun(req.params.id);
+    if (!detail) {
+      res.status(404).json({
+        error: 'not_found',
+        message: `Workflow run "${req.params.id}" was not found.`,
+      });
+      return;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to read workflow run.';
+    res.status(500).json({ error: 'workflow_run_read_failed', message });
+    return;
+  }
+
+  const { id: runId } = req.params;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const subscribers = workflowRunSubscribers.get(runId) ?? new Set<express.Response>();
+  subscribers.add(res);
+  workflowRunSubscribers.set(runId, subscribers);
+
+  res.write(
+    `data: ${JSON.stringify({
+      method: 'workflow-run/connected',
+      params: { runId },
+    } satisfies WorkflowRunStreamEvent)}\n\n`,
+  );
+
+  const keepAlive = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 15_000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    const currentSubscribers = workflowRunSubscribers.get(runId);
+    currentSubscribers?.delete(res);
+    if (!currentSubscribers || currentSubscribers.size === 0) {
+      workflowRunSubscribers.delete(runId);
+    }
+    res.end();
+  });
 });
 
 app.post('/api/workflow-runs/:id/planning-message', async (req, res) => {

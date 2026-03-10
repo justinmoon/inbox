@@ -9,6 +9,7 @@ export const workflowRunStatuses = ['active', 'completed', 'failed', 'cancelled'
 export const gateStatuses = ['open', 'answered', 'dismissed'] as const;
 export const gateKinds = ['approval', 'input_required'] as const;
 export const agentSessionStatuses = ['active', 'completed', 'failed'] as const;
+export const agentTurnStatuses = ['running', 'completed', 'failed', 'interrupted'] as const;
 
 export const workflowRepositoryInputSchema = z
   .object({
@@ -75,7 +76,11 @@ export const agentSessionSchema = z.object({
   thread_id: z.string().min(1),
   workspace_id: z.string().min(1).nullable().default(null),
   cwd: z.string().min(1).nullable().default(null),
+  active_turn_id: z.string().min(1).nullable().default(null),
+  active_turn_started_at: timestampSchema.nullable().default(null),
   latest_turn_id: z.string().min(1).nullable().default(null),
+  latest_turn_completed_at: timestampSchema.nullable().default(null),
+  last_turn_status: z.enum(agentTurnStatuses).nullable().default(null),
   status: z.enum(agentSessionStatuses),
   created_at: timestampSchema,
   updated_at: timestampSchema,
@@ -106,6 +111,7 @@ export type WorkflowRunStatus = (typeof workflowRunStatuses)[number];
 export type GateStatus = (typeof gateStatuses)[number];
 export type GateKind = (typeof gateKinds)[number];
 export type AgentSessionStatus = (typeof agentSessionStatuses)[number];
+export type AgentTurnStatus = (typeof agentTurnStatuses)[number];
 
 export type WorkflowRepositoryInput = z.infer<typeof workflowRepositoryInputSchema>;
 export type GateOptionRecord = z.infer<typeof gateOptionSchema>;
