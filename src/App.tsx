@@ -14,6 +14,7 @@ import { HotkeyOverlay } from './components/HotkeyOverlay.tsx';
 import { InboxRail } from './components/InboxRail.tsx';
 import { SessionReplayPanel } from './components/SessionReplayPanel.tsx';
 import { SessionWall } from './components/SessionWall.tsx';
+import { ThemeSwitcher } from './components/ThemeSwitcher.tsx';
 import {
   RequestError,
   fetchChangeUnitDetail,
@@ -32,9 +33,33 @@ type LiveSessionUpdates = {
 };
 
 const REPLAY_PANE_STORAGE_KEY = 'inbox.replayPaneWidth';
+const THEME_STORAGE_KEY = 'inbox.theme';
 const DEFAULT_REPLAY_PANE_WIDTH = 420;
 const MIN_REPLAY_PANE_WIDTH = 320;
 const REPLAY_PANE_STEP = 48;
+const THEMES = [
+  {
+    id: 'tokyo-night',
+    label: 'Tokyo Night',
+    description: 'Deep navy review cockpit with bright blue accents.',
+  },
+  {
+    id: 'nord',
+    label: 'Nord',
+    description: 'Muted arctic contrast with cooler edges and calmer highlights.',
+  },
+  {
+    id: 'catppuccin',
+    label: 'Catppuccin',
+    description: 'Warm dark surfaces with softer mauve and teal contrast.',
+  },
+  {
+    id: 'pika-night',
+    label: 'Pika Night',
+    description: 'Dark editorial palette closer to a reading-first briefing.',
+  },
+] as const;
+type ThemeId = (typeof THEMES)[number]['id'];
 
 function clampReplayPaneWidth(width: number): number {
   const minWidth = MIN_REPLAY_PANE_WIDTH;
@@ -57,6 +82,16 @@ function readReplayPaneWidth(): number {
 
 function readSelectedChangeId(): string | null {
   return new URLSearchParams(window.location.search).get('change');
+}
+
+function isThemeId(value: string | null): value is ThemeId {
+  return Boolean(value && THEMES.some((theme) => theme.id === value));
+}
+
+function readThemeId(): ThemeId {
+  if (typeof window === 'undefined') return 'tokyo-night';
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return isThemeId(stored) ? stored : 'tokyo-night';
 }
 
 function writeSelectedChangeId(id: string, replace = false) {
@@ -105,10 +140,12 @@ export function App() {
   const [items, setItems] = useState<ChangeUnitListItem[]>([]);
   const [detail, setDetail] = useState<ChangeUnitDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(() => readSelectedChangeId());
+  const [themeId, setThemeId] = useState<ThemeId>(() => readThemeId());
   const [defaultChangeId, setDefaultChangeId] = useState<string | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [preferredSessionId, setPreferredSessionId] = useState<string | null>(null);
   const [sessionWallOpen, setSessionWallOpen] = useState(false);
   const [replayPaneWidth, setReplayPaneWidth] = useState<number>(() => readReplayPaneWidth());
@@ -219,6 +256,11 @@ export function App() {
   }, [replayPaneWidth]);
 
   useEffect(() => {
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeId);
+    document.documentElement.dataset.theme = themeId;
+  }, [themeId]);
+
+  useEffect(() => {
     const onResize = () => {
       setReplayPaneWidth((current) => clampReplayPaneWidth(current));
     };
@@ -272,7 +314,13 @@ export function App() {
         return;
       }
 
-      if (helpOpen) return;
+      if (event.key === 'Escape' && themePickerOpen) {
+        event.preventDefault();
+        setThemePickerOpen(false);
+        return;
+      }
+
+      if (helpOpen || themePickerOpen) return;
 
       if (sessionWallOpen) {
         switch (event.key) {
@@ -353,7 +401,15 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeSessionId, helpOpen, mainQueueItems, orderedSessionIds, sessionWallOpen, selectedId]);
+  }, [
+    activeSessionId,
+    helpOpen,
+    mainQueueItems,
+    orderedSessionIds,
+    selectedId,
+    sessionWallOpen,
+    themePickerOpen,
+  ]);
 
   function selectChangeUnit(id: string, replace = false) {
     startTransition(() => {
@@ -764,19 +820,32 @@ export function App() {
       )}
 
       {!sessionWallOpen ? (
-        <button
-          className="floating-help-button"
-          aria-label="Open keyboard shortcuts help"
-          aria-haspopup="dialog"
-          aria-expanded={helpOpen}
-          onClick={() => setHelpOpen(true)}
-          type="button"
-        >
-          <span className="floating-help-glyph" aria-hidden="true">
-            ?
-          </span>
-          <span>Keys</span>
-        </button>
+        <>
+          <ThemeSwitcher
+            activeThemeId={themeId}
+            open={themePickerOpen}
+            themes={[...THEMES]}
+            onSelect={(nextThemeId) => {
+              setThemeId(nextThemeId as ThemeId);
+              setThemePickerOpen(false);
+            }}
+            onToggle={() => setThemePickerOpen((current) => !current)}
+          />
+
+          <button
+            className="floating-help-button"
+            aria-label="Open keyboard shortcuts help"
+            aria-haspopup="dialog"
+            aria-expanded={helpOpen}
+            onClick={() => setHelpOpen(true)}
+            type="button"
+          >
+            <span className="floating-help-glyph" aria-hidden="true">
+              ?
+            </span>
+            <span>Keys</span>
+          </button>
+        </>
       ) : null}
 
       <HotkeyOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />

@@ -278,6 +278,37 @@ async function assertReplayWorkspaceControls() {
   );
 }
 
+async function assertThemeControls() {
+  await browserEval(
+    [
+      '(async () => {',
+      "  const root = document.documentElement;",
+      "  if (root.dataset.theme !== 'tokyo-night') {",
+      "    throw new Error(`Expected default theme to be tokyo-night, saw ${root.dataset.theme}.`);",
+      '  }',
+      "  const toggle = document.querySelector('[data-theme-toggle=\"true\"]');",
+      "  if (!(toggle instanceof HTMLElement)) throw new Error('Theme toggle is missing.');",
+      '  toggle.click();',
+      '  await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      "  const nordOption = document.querySelector('[data-theme-option=\"nord\"]');",
+      "  if (!(nordOption instanceof HTMLElement)) throw new Error('Nord theme option is missing.');",
+      '  nordOption.click();',
+      '  await new Promise((resolve) => window.setTimeout(resolve, 120));',
+      "  if (root.dataset.theme !== 'nord') throw new Error(`Expected theme to switch to nord, saw ${root.dataset.theme}.`);",
+      "  if (window.localStorage.getItem('inbox.theme') !== 'nord') throw new Error('Theme selection did not persist to localStorage.');",
+      '})()',
+    ].join(' '),
+  );
+
+  await runBrowser(['open', baseUrl]);
+  await browserEval(
+    [
+      "const root = document.documentElement;",
+      "if (root.dataset.theme !== 'nord') throw new Error(`Expected persisted theme to stay nord after reload, saw ${root.dataset.theme}.`);",
+    ].join(' '),
+  );
+}
+
 async function assertReplayWidthPersists(expectedChangeId: string) {
   await runBrowser(['open', `${baseUrl}/?change=${expectedChangeId}`]);
   await browserEval(
@@ -805,6 +836,8 @@ try {
   await assertWorkspaceSubsystem();
 
   await runBrowser(['open', baseUrl]);
+  await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
+  await assertThemeControls();
   await assertSurfaceLoaded(canonicalBundle.change_unit.title, canonicalStepTitles);
   await assertReplayWorkspaceControls();
   await assertCodexReplayKinds('planner', ['agentMessage']);
