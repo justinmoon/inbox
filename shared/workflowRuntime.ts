@@ -10,6 +10,7 @@ export const gateStatuses = ['open', 'answered', 'dismissed'] as const;
 export const gateKinds = ['approval', 'input_required'] as const;
 export const agentSessionStatuses = ['active', 'completed', 'failed'] as const;
 export const agentTurnStatuses = ['running', 'completed', 'failed', 'interrupted'] as const;
+export const workflowArtifactStatuses = ['pending', 'ready', 'failed'] as const;
 export const swarmAgentKinds = ['hub', 'worker'] as const;
 export const swarmRunTopLevelStates = ['working', 'needs_user_input', 'failed', 'completed'] as const;
 export const swarmRunAgentStatuses = ['idle', 'working', 'waiting_on_user', 'failed'] as const;
@@ -110,12 +111,31 @@ export const runEventSchema = z.object({
   metadata: metadataSchema,
 });
 
+export const workflowArtifactSchema = z.object({
+  id: z.string().min(1),
+  run_id: z.string().min(1),
+  workflow_id: z.string().min(1),
+  kind: z.string().min(1),
+  status: z.enum(workflowArtifactStatuses),
+  state_id: z.string().min(1).nullable().default(null),
+  session_id: z.string().min(1).nullable().default(null),
+  thread_id: z.string().min(1).nullable().default(null),
+  turn_id: z.string().min(1).nullable().default(null),
+  content: z.string().min(1).nullable().default(null),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+  completed_at: timestampSchema.nullable().default(null),
+  tags: tagsSchema,
+  metadata: metadataSchema,
+});
+
 export type WorkflowStateFamily = (typeof workflowStateFamilies)[number];
 export type WorkflowRunStatus = (typeof workflowRunStatuses)[number];
 export type GateStatus = (typeof gateStatuses)[number];
 export type GateKind = (typeof gateKinds)[number];
 export type AgentSessionStatus = (typeof agentSessionStatuses)[number];
 export type AgentTurnStatus = (typeof agentTurnStatuses)[number];
+export type WorkflowArtifactStatus = (typeof workflowArtifactStatuses)[number];
 export type SwarmAgentKind = (typeof swarmAgentKinds)[number];
 export type SwarmRunTopLevelState = (typeof swarmRunTopLevelStates)[number];
 export type SwarmRunAgentStatus = (typeof swarmRunAgentStatuses)[number];
@@ -127,6 +147,7 @@ export type GateRecord = z.infer<typeof gateSchema>;
 export type WorkflowRunRecord = z.infer<typeof workflowRunSchema>;
 export type AgentSessionRecord = z.infer<typeof agentSessionSchema>;
 export type RunEventRecord = z.infer<typeof runEventSchema>;
+export type WorkflowArtifactRecord = z.infer<typeof workflowArtifactSchema>;
 
 export type WorkflowDefinitionValidationIssue = {
   level: 'error' | 'warning';

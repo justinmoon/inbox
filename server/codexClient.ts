@@ -21,6 +21,12 @@ type ResumeThreadInput = StartThreadInput & {
   threadId: string;
 };
 
+type ForkThreadInput = {
+  threadId: string;
+  persistExtendedHistory?: boolean;
+  personality?: 'friendly' | 'pragmatic' | 'none';
+};
+
 type StartTurnInput = {
   threadId: string;
   text: string;
@@ -48,6 +54,7 @@ export interface CodexClient {
   ensureStarted(): Promise<void>;
   startThread(input: StartThreadInput): Promise<{ threadId: string }>;
   resumeThread(input: ResumeThreadInput): Promise<{ threadId: string }>;
+  forkThread(input: ForkThreadInput): Promise<{ threadId: string }>;
   startTurn(input: StartTurnInput): Promise<{ turnId: string }>;
   steerTurn(input: SteerTurnInput): Promise<{ turnId: string }>;
   waitForTurnCompletion(input: WaitForTurnCompletionInput): Promise<{ turnId: string; status: string }>;
@@ -146,6 +153,17 @@ export class AppServerCodexClient implements CodexClient {
       approvalPolicy: input.approvalPolicy ?? undefined,
       sandboxPolicy: input.sandboxPolicy ?? undefined,
       model: input.model ?? undefined,
+      persistExtendedHistory: input.persistExtendedHistory ?? true,
+      personality: input.personality ?? 'pragmatic',
+    });
+
+    return { threadId: extractThreadId(result) };
+  }
+
+  async forkThread(input: ForkThreadInput) {
+    await this.ensureStarted();
+    const result = await this.#process.request('thread/fork', {
+      threadId: input.threadId,
       persistExtendedHistory: input.persistExtendedHistory ?? true,
       personality: input.personality ?? 'pragmatic',
     });

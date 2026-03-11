@@ -10,6 +10,7 @@ import type {
   AgentSessionRecord,
   GateRecord,
   RunEventRecord,
+  WorkflowArtifactRecord,
   WorkflowDefinitionDetail,
   WorkflowDefinitionSummary,
   WorkflowRunRecord,
@@ -363,6 +364,7 @@ export type WorkflowRunSessionDetail = {
 export type WorkflowRunDetail = {
   run: WorkflowRunRecord;
   sessions: WorkflowRunSessionDetail[];
+  artifacts: WorkflowArtifactRecord[];
   open_gates: GateRecord[];
   events: RunEventRecord[];
   swarm: WorkflowRunSwarmView | null;

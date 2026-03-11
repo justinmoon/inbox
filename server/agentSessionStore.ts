@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -35,16 +36,26 @@ async function readJsonMap<T>(
 
 async function writeJsonMap<T>(filePath: string, records: Record<string, T>) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify(records, null, 2), 'utf8');
   await fs.rename(tempPath, filePath);
 }
 
 export class AgentSessionStore {
   #filePath: string;
+  #writeQueue: Promise<void> = Promise.resolve();
 
   constructor(rootDir: string) {
     this.#filePath = path.join(rootDir, AGENT_SESSIONS_FILE);
+  }
+
+  #withWriteLock<T>(operation: () => Promise<T>) {
+    const result = this.#writeQueue.then(operation, operation);
+    this.#writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async listByRun(runId: string): Promise<AgentSessionRecord[]> {
@@ -60,13 +71,17 @@ export class AgentSessionStore {
   }
 
   async saveSession(session: AgentSessionRecord): Promise<AgentSessionRecord> {
-    const sessions = await readJsonMap(this.#filePath, (value) => agentSessionSchema.parse(value));
-    sessions[session.id] = agentSessionSchema.parse(session);
-    await writeJsonMap(this.#filePath, sessions);
-    return session;
+    return await this.#withWriteLock(async () => {
+      const sessions = await readJsonMap(this.#filePath, (value) => agentSessionSchema.parse(value));
+      sessions[session.id] = agentSessionSchema.parse(session);
+      await writeJsonMap(this.#filePath, sessions);
+      return session;
+    });
   }
 
   async clear(): Promise<void> {
-    await fs.rm(this.#filePath, { force: true });
+    await this.#withWriteLock(async () => {
+      await fs.rm(this.#filePath, { force: true });
+    });
   }
 }

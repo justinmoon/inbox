@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -41,7 +42,7 @@ async function readJsonMap<T>(
 
 async function writeJsonMap<T>(filePath: string, records: Record<string, T>) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify(records, null, 2), 'utf8');
   await fs.rename(tempPath, filePath);
 }

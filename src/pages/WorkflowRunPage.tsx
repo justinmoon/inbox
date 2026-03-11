@@ -5,6 +5,7 @@ import type {
   GateRecord,
   SwarmRunAgentView,
   SwarmTimelineEntry,
+  WorkflowArtifactRecord,
   WorkflowDefinitionSummary,
   WorkflowRunRecord,
 } from '../../shared/workflowRuntime.ts';
@@ -63,6 +64,24 @@ function findPlannerSession(detail: WorkflowRunDetail | null) {
 
 function findOpenApprovalGate(detail: WorkflowRunDetail | null) {
   return detail?.open_gates.find((gate) => gate.kind === 'approval') ?? null;
+}
+
+function findReadyArtifact(
+  detail: WorkflowRunDetail | null,
+  kind: 'tutorial_artifact' | 'next_prompt_artifact',
+) {
+  if (!detail) {
+    return null;
+  }
+
+  for (let index = detail.artifacts.length - 1; index >= 0; index -= 1) {
+    const artifact = detail.artifacts[index];
+    if (artifact && artifact.kind === kind && artifact.status === 'ready') {
+      return artifact;
+    }
+  }
+
+  return null;
 }
 
 function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetail }) {
@@ -214,6 +233,31 @@ function TimelineCard({ entry }: { entry: SwarmTimelineEntry }) {
   );
 }
 
+function ArtifactCard({ artifact }: { artifact: WorkflowArtifactRecord }) {
+  return (
+    <article
+      className="workflow-event-card workflow-artifact-card"
+      data-workflow-artifact-kind={artifact.kind}
+      data-workflow-artifact-status={artifact.status}
+      data-workflow-artifact-id={artifact.id}
+    >
+      <header>
+        <div>
+          <p className="workflow-card-kicker">{humanizeToken(artifact.status)}</p>
+          <h4>{humanizeToken(artifact.kind)}</h4>
+        </div>
+        <span className="workflow-state-pill workflow-state-pill-slate">{artifact.state_id ?? 'unknown'}</span>
+      </header>
+      <p className="workflow-muted-copy">
+        Session <code>{artifact.session_id ?? 'n/a'}</code> • Thread <code>{artifact.thread_id ?? 'n/a'}</code>
+      </p>
+      <pre>
+        <code>{artifact.content ?? 'Artifact content is not ready yet.'}</code>
+      </pre>
+    </article>
+  );
+}
+
 export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   const [definitions, setDefinitions] = useState<WorkflowDefinitionSummary[]>([]);
   const [runs, setRuns] = useState<WorkflowRunRecord[]>([]);
@@ -242,6 +286,8 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
   const plannerSession = useMemo(() => findPlannerSession(detail), [detail]);
   const openApprovalGate = useMemo(() => findOpenApprovalGate(detail), [detail]);
+  const tutorialArtifact = useMemo(() => findReadyArtifact(detail, 'tutorial_artifact'), [detail]);
+  const nextPromptArtifact = useMemo(() => findReadyArtifact(detail, 'next_prompt_artifact'), [detail]);
   const swarmView = detail?.swarm ?? null;
   const workflowTitle = detail
     ? swarmView?.definition.title ?? getWorkflowTitle(definitions, detail.run.workflow_id)
@@ -473,15 +519,16 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
     setAnsweringGate(true);
     setActionError(null);
+    const requiresMessage = optionId === 'revise' || optionId === 'redirect';
     try {
       const nextDetail = await answerWorkflowGate({
         runId: detail.run.id,
         gateId: openApprovalGate.id,
         optionId,
-        message: optionId === 'revise' ? revisionMessage.trim() : undefined,
+        message: requiresMessage ? revisionMessage.trim() : undefined,
       });
       setDetail(nextDetail);
-      if (optionId === 'revise') {
+      if (requiresMessage) {
         setRevisionMessage('');
       }
       await refreshRuns();
@@ -563,9 +610,122 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
     }
 
     if (detail.run.current_state_family === 'approval' && openApprovalGate) {
+      if (detail.run.current_state_id === 'step_approval') {
+        const approveNextOption = openApprovalGate.options.find((option) => option.id === 'approve_next') ?? null;
+        const redirectOption = openApprovalGate.options.find((option) => option.id === 'redirect') ?? null;
+        const finishOption = openApprovalGate.options.find((option) => option.id === 'finish') ?? null;
+        const abortOption = openApprovalGate.options.find((option) => option.id === 'abort') ?? null;
+        const approvedPromptCandidate = openApprovalGate.metadata.approved_prompt_candidate ?? null;
+        const tutorialContent =
+          tutorialArtifact?.content ?? openApprovalGate.metadata.tutorial_artifact_content ?? null;
+        const nextPromptContent =
+          nextPromptArtifact?.content ??
+          openApprovalGate.metadata.next_prompt_artifact_content ??
+          openApprovalGate.metadata.prompt_candidate ??
+          null;
+
+        return (
+          <section
+            className="workflow-panel workflow-primary-panel"
+            data-workflow-primary-surface="step_approval"
+            data-workflow-gate-id={openApprovalGate.id}
+          >
+            <header className="workflow-panel-header">
+              <div>
+                <p className="workflow-card-kicker">Step Approval</p>
+                <h2>{openApprovalGate.title}</h2>
+              </div>
+              <span className="workflow-state-pill workflow-state-pill-amber">Waiting for user</span>
+            </header>
+
+            <p>{openApprovalGate.description ?? 'Review the accepted step packet before continuing the loop.'}</p>
+
+            <div className="workflow-step-packet-grid">
+              <div className="workflow-approval-artifact" data-workflow-step-approved-prompt="true">
+                <p className="workflow-card-kicker">Accepted Step</p>
+                <pre>
+                  <code>{approvedPromptCandidate ?? 'Approved prompt candidate unavailable.'}</code>
+                </pre>
+              </div>
+
+              <div className="workflow-approval-artifact" data-workflow-step-tutorial="true">
+                <p className="workflow-card-kicker">Tutorial</p>
+                <pre>
+                  <code>{tutorialContent ?? 'Tutorial artifact unavailable.'}</code>
+                </pre>
+              </div>
+
+              <div className="workflow-approval-artifact" data-workflow-step-next-prompt="true">
+                <p className="workflow-card-kicker">Next Prompt</p>
+                <pre>
+                  <code>{nextPromptContent ?? 'Next prompt artifact unavailable.'}</code>
+                </pre>
+              </div>
+            </div>
+
+            <p className="workflow-muted-copy">
+              Full planner, implementer, and worker transcripts remain available in the session list below.
+            </p>
+
+            {redirectOption ? (
+              <label className="workflow-field">
+                <span>Redirect feedback</span>
+                <textarea
+                  data-workflow-redirect-input="true"
+                  value={revisionMessage}
+                  onChange={(event) => setRevisionMessage(event.target.value)}
+                  placeholder="Tell the planner what to change before the next step."
+                  rows={4}
+                />
+              </label>
+            ) : null}
+
+            <div className="workflow-action-row">
+              <button
+                className="solid-button"
+                data-workflow-gate-action="approve_next"
+                disabled={answeringGate || !nextPromptContent || !approveNextOption}
+                onClick={() => void handleGateAction(approveNextOption?.id ?? 'approve_next')}
+                type="button"
+              >
+                {answeringGate ? 'Working…' : approveNextOption?.label ?? 'Approve next prompt'}
+              </button>
+              <button
+                className="ghost-button"
+                data-workflow-gate-action="redirect"
+                disabled={answeringGate || !revisionMessage.trim() || !redirectOption}
+                onClick={() => void handleGateAction(redirectOption?.id ?? 'redirect')}
+                type="button"
+              >
+                {redirectOption?.label ?? 'Redirect plan'}
+              </button>
+              <button
+                className="ghost-button"
+                data-workflow-gate-action="finish"
+                disabled={answeringGate || !finishOption}
+                onClick={() => void handleGateAction(finishOption?.id ?? 'finish')}
+                type="button"
+              >
+                {finishOption?.label ?? 'Finish workflow'}
+              </button>
+              <button
+                className="ghost-button"
+                data-workflow-gate-action="abort"
+                disabled={answeringGate || !abortOption}
+                onClick={() => void handleGateAction(abortOption?.id ?? 'abort')}
+                type="button"
+              >
+                {abortOption?.label ?? 'Abort run'}
+              </button>
+            </div>
+          </section>
+        );
+      }
+
       const promptCandidate = openApprovalGate.metadata.prompt_candidate ?? null;
       const approveOption = openApprovalGate.options.find((option) => option.id === 'approve') ?? null;
       const reviseOption = openApprovalGate.options.find((option) => option.id === 'revise') ?? null;
+      const abortOption = openApprovalGate.options.find((option) => option.id === 'abort') ?? null;
       return (
         <section
           className="workflow-panel workflow-primary-panel"
@@ -618,6 +778,15 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               type="button"
             >
               {reviseOption?.label ?? 'Return to planning'}
+            </button>
+            <button
+              className="ghost-button"
+              data-workflow-gate-action="abort"
+              disabled={answeringGate || !abortOption}
+              onClick={() => void handleGateAction(abortOption?.id ?? 'abort')}
+              type="button"
+            >
+              {abortOption?.label ?? 'Abort run'}
             </button>
           </div>
         </section>
@@ -817,41 +986,37 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                     </span>
                   </div>
 
-                  <div className="workflow-swarm-graph">
-                    {swarmView.agents[0] ? <SwarmAgentNode agent={swarmView.agents[0]} /> : null}
-                    <div className="workflow-swarm-arrow">delegates</div>
-                    {swarmView.current_gate ? (
-                      <>
-                        <article
-                          className="workflow-swarm-gate"
-                          data-swarm-current-gate={swarmView.current_gate.gate_id}
-                          data-swarm-current-gate-rule={swarmView.current_gate.rule_id ?? ''}
-                          data-swarm-unlocks-route-id={swarmView.current_gate.unlocks_route_id ?? ''}
-                          data-swarm-unlocks-target-agent-id={
-                            swarmView.current_gate.unlocks_target_agent_id ?? ''
-                          }
-                        >
-                          <p className="workflow-card-kicker">Current Gate</p>
-                          <h3>{swarmView.current_gate.title}</h3>
-                          <p className="workflow-muted-copy">
-                            {swarmView.current_gate.artifact?.title ?? 'Gate artifact'}
-                          </p>
-                          {swarmView.current_gate.unlocks_target_agent_title ? (
-                            <p className="workflow-muted-copy">
-                              Approve unlocks {swarmView.current_gate.unlocks_route_title ?? 'the next route'} to{' '}
-                              {swarmView.current_gate.unlocks_target_agent_title}.
-                            </p>
-                          ) : null}
-                        </article>
-                        <div className="workflow-swarm-arrow">
-                          {swarmView.current_gate.unlocks_route_title
-                            ? `approve via ${swarmView.current_gate.unlocks_route_title}`
-                            : 'approve'}
-                        </div>
-                      </>
-                    ) : null}
-                    {swarmView.agents[1] ? <SwarmAgentNode agent={swarmView.agents[1]} /> : null}
+                  <div className="workflow-swarm-node-grid">
+                    {swarmView.agents.map((agent) => (
+                      <SwarmAgentNode key={agent.agent_id} agent={agent} />
+                    ))}
                   </div>
+
+                  {swarmView.current_gate ? (
+                    <article
+                      className="workflow-swarm-gate"
+                      data-swarm-current-gate={swarmView.current_gate.gate_id}
+                      data-swarm-current-gate-rule={swarmView.current_gate.rule_id ?? ''}
+                      data-swarm-unlocks-route-id={swarmView.current_gate.unlocks_route_id ?? ''}
+                      data-swarm-unlocks-target-agent-id={swarmView.current_gate.unlocks_target_agent_id ?? ''}
+                    >
+                      <p className="workflow-card-kicker">Current Gate</p>
+                      <h3>{swarmView.current_gate.title}</h3>
+                      <p className="workflow-muted-copy">
+                        {swarmView.current_gate.artifact?.title ?? 'Gate artifact'}
+                      </p>
+                      {swarmView.current_gate.unlocks_target_agent_title ? (
+                        <p className="workflow-muted-copy">
+                          Approve unlocks {swarmView.current_gate.unlocks_route_title ?? 'the next route'} to{' '}
+                          {swarmView.current_gate.unlocks_target_agent_title}.
+                        </p>
+                      ) : null}
+                    </article>
+                  ) : null}
+
+                  <pre className="workflow-mermaid-block" data-workflow-swarm-mermaid="true">
+                    <code>{swarmView.graph_mermaid}</code>
+                  </pre>
                 </>
               ) : (
                 <p className="workflow-muted-copy">No swarm mapping is available for this workflow run yet.</p>
@@ -965,6 +1130,24 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                     <GateSummary key={gate.id} gate={gate} />
                   ))}
                 </div>
+              )}
+            </section>
+
+            <section className="workflow-panel workflow-artifacts-panel" data-workflow-artifacts-panel="true">
+              <header className="workflow-panel-header">
+                <div>
+                  <p className="workflow-card-kicker">Artifacts</p>
+                  <h2>Persisted worker outputs</h2>
+                </div>
+              </header>
+              {detail.artifacts.length > 0 ? (
+                <div className="workflow-artifact-list">
+                  {detail.artifacts.map((artifact) => (
+                    <ArtifactCard key={artifact.id} artifact={artifact} />
+                  ))}
+                </div>
+              ) : (
+                <p className="workflow-muted-copy">No runtime artifacts have been persisted for this run yet.</p>
               )}
             </section>
 

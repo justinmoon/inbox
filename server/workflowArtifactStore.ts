@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { runEventSchema, type RunEventRecord } from '../shared/workflowRuntime.ts';
+import { workflowArtifactSchema, type WorkflowArtifactRecord } from '../shared/workflowRuntime.ts';
 
-const RUN_EVENTS_FILE = 'workflow-run-events.json';
+const WORKFLOW_ARTIFACTS_FILE = 'workflow-artifacts.json';
 
 async function readJsonMap<T>(
   filePath: string,
@@ -41,12 +41,12 @@ async function writeJsonMap<T>(filePath: string, records: Record<string, T>) {
   await fs.rename(tempPath, filePath);
 }
 
-export class RunEventStore {
+export class WorkflowArtifactStore {
   #filePath: string;
   #writeQueue: Promise<void> = Promise.resolve();
 
   constructor(rootDir: string) {
-    this.#filePath = path.join(rootDir, RUN_EVENTS_FILE);
+    this.#filePath = path.join(rootDir, WORKFLOW_ARTIFACTS_FILE);
   }
 
   #withWriteLock<T>(operation: () => Promise<T>) {
@@ -58,19 +58,24 @@ export class RunEventStore {
     return result;
   }
 
-  async listByRun(runId: string): Promise<RunEventRecord[]> {
-    const events = await readJsonMap(this.#filePath, (value) => runEventSchema.parse(value));
-    return Object.values(events)
-      .filter((event) => event.run_id === runId)
+  async listByRun(runId: string): Promise<WorkflowArtifactRecord[]> {
+    const artifacts = await readJsonMap(this.#filePath, (value) => workflowArtifactSchema.parse(value));
+    return Object.values(artifacts)
+      .filter((artifact) => artifact.run_id === runId)
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
-  async saveEvent(event: RunEventRecord): Promise<RunEventRecord> {
+  async getArtifact(id: string): Promise<WorkflowArtifactRecord | null> {
+    const artifacts = await readJsonMap(this.#filePath, (value) => workflowArtifactSchema.parse(value));
+    return artifacts[id] ?? null;
+  }
+
+  async saveArtifact(artifact: WorkflowArtifactRecord): Promise<WorkflowArtifactRecord> {
     return await this.#withWriteLock(async () => {
-      const events = await readJsonMap(this.#filePath, (value) => runEventSchema.parse(value));
-      events[event.id] = runEventSchema.parse(event);
-      await writeJsonMap(this.#filePath, events);
-      return event;
+      const artifacts = await readJsonMap(this.#filePath, (value) => workflowArtifactSchema.parse(value));
+      artifacts[artifact.id] = workflowArtifactSchema.parse(artifact);
+      await writeJsonMap(this.#filePath, artifacts);
+      return artifact;
     });
   }
 

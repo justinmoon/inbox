@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -35,16 +36,26 @@ async function readJsonMap<T>(
 
 async function writeJsonMap<T>(filePath: string, records: Record<string, T>) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify(records, null, 2), 'utf8');
   await fs.rename(tempPath, filePath);
 }
 
 export class WorkflowRunStore {
   #filePath: string;
+  #writeQueue: Promise<void> = Promise.resolve();
 
   constructor(rootDir: string) {
     this.#filePath = path.join(rootDir, WORKFLOW_RUNS_FILE);
+  }
+
+  #withWriteLock<T>(operation: () => Promise<T>) {
+    const result = this.#writeQueue.then(operation, operation);
+    this.#writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async listRuns(): Promise<WorkflowRunRecord[]> {
@@ -58,13 +69,17 @@ export class WorkflowRunStore {
   }
 
   async saveRun(run: WorkflowRunRecord): Promise<WorkflowRunRecord> {
-    const runs = await readJsonMap(this.#filePath, (value) => workflowRunSchema.parse(value));
-    runs[run.id] = workflowRunSchema.parse(run);
-    await writeJsonMap(this.#filePath, runs);
-    return run;
+    return await this.#withWriteLock(async () => {
+      const runs = await readJsonMap(this.#filePath, (value) => workflowRunSchema.parse(value));
+      runs[run.id] = workflowRunSchema.parse(run);
+      await writeJsonMap(this.#filePath, runs);
+      return run;
+    });
   }
 
   async clear(): Promise<void> {
-    await fs.rm(this.#filePath, { force: true });
+    await this.#withWriteLock(async () => {
+      await fs.rm(this.#filePath, { force: true });
+    });
   }
 }

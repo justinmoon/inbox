@@ -2345,6 +2345,7 @@ body.is-resizing-replay {
 .workflow-create-form,
 .workflow-composer,
 .workflow-session-list,
+.workflow-artifact-list,
 .workflow-run-list,
 .workflow-gate-list,
 .workflow-event-list {
@@ -2495,16 +2496,16 @@ body.is-resizing-replay {
 }
 
 .workflow-swarm-panel,
+.workflow-artifacts-panel,
 .workflow-sessions-panel,
 .workflow-events-panel {
   grid-column: 1 / -1;
 }
 
-.workflow-swarm-graph {
+.workflow-swarm-node-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 0.8fr) auto minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
   gap: 0.8rem;
-  align-items: center;
 }
 
 .workflow-swarm-node,
@@ -2554,6 +2555,21 @@ body.is-resizing-replay {
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.16em;
+}
+
+.workflow-step-packet-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.workflow-artifact-card pre {
+  margin: 0;
+  padding: 0.95rem 1rem;
+  border-radius: 18px;
+  background: var(--surface-code-strong);
+  color: var(--ink);
+  overflow: auto;
 }
 
 .workflow-timeline-list {
@@ -2707,7 +2723,8 @@ body.is-resizing-replay {
     grid-template-columns: 1fr;
   }
 
-  .workflow-swarm-graph {
+  .workflow-swarm-node-grid,
+  .workflow-step-packet-grid {
     grid-template-columns: 1fr;
   }
 

@@ -4,14 +4,14 @@ export const planImplementReviewSwarm = defineSwarm({
   id: 'plan-implement-review',
   title: 'Planner / Implementer Hub',
   summary:
-    'A hub-and-spoke swarm where the planner owns user conversation, prompt proposal, and review, while the implementer executes approved prompts.',
+    'A hub-and-spoke swarm where the planner owns user conversation, prompt proposal, and review, while worker agents execute implementation and artifact-writing tasks.',
   agents: [
     {
       id: 'planner',
       title: 'Planner',
       summary: 'Hub agent that talks to the user, proposes prompts, opens gates, and later reviews work.',
       kind: 'hub',
-      owned_state_ids: ['planning_conversation', 'first_prompt_approval', 'auto_review', 'step_approval'],
+      owned_state_ids: ['planning_conversation', 'first_prompt_approval', 'auto_review', 'artifact_forking', 'step_approval'],
       session_kinds: ['planning_conversation'],
       role_prompt:
         'You are the planner/reviewer hub for a workflow runtime with explicit user gates.',
@@ -35,7 +35,7 @@ export const planImplementReviewSwarm = defineSwarm({
         'review_replan_required',
       ],
       target_artifact_kind_ids: ['prompt_candidate'],
-      target_gate_rule_ids: ['prompt_candidate_approval'],
+      target_gate_rule_ids: ['prompt_candidate_approval', 'step_packet_approval'],
     },
     {
       id: 'implementer',
@@ -57,6 +57,46 @@ export const planImplementReviewSwarm = defineSwarm({
       target_artifact_kind_ids: [],
       target_gate_rule_ids: [],
     },
+    {
+      id: 'tutorial_writer',
+      title: 'Tutorial Writer',
+      summary: 'Worker agent that turns an accepted implementation step into a user-facing tutorial artifact.',
+      kind: 'worker',
+      owned_state_ids: ['artifact_forking'],
+      session_kinds: ['tutorial_writing'],
+      role_prompt:
+        'You are the tutorial writer worker for a hub-and-spoke swarm run. Produce a concise user-facing tutorial artifact from the accepted step.',
+      operating_guidelines: [
+        'Base the tutorial on the approved prompt, the implementer result, and the accepted review context.',
+        'Explain what changed, why it matters, and what the user should understand before approving the next step.',
+        'Emit exactly one explicit tutorial artifact marker and no other workflow markers.',
+      ],
+      review_role_prompt: null,
+      review_guidelines: [],
+      expected_marker_ids: ['tutorial_artifact'],
+      target_artifact_kind_ids: ['tutorial_artifact'],
+      target_gate_rule_ids: ['step_packet_approval'],
+    },
+    {
+      id: 'next_prompt_writer',
+      title: 'Next Prompt Writer',
+      summary: 'Worker agent that proposes the next implementer prompt after an accepted step.',
+      kind: 'worker',
+      owned_state_ids: ['artifact_forking'],
+      session_kinds: ['next_prompt_writing'],
+      role_prompt:
+        'You are the next-prompt writer worker for a hub-and-spoke swarm run. Produce the next bounded implementer prompt from the accepted step.',
+      operating_guidelines: [
+        'Base the next prompt on the workflow goal, the accepted step, and the current repository direction.',
+        'Keep the prompt implementer-ready, scoped, and explicit enough to send to a worker without more planning.',
+        'Emit exactly one explicit next-prompt artifact marker and no other workflow markers.',
+      ],
+      review_role_prompt: null,
+      review_guidelines: [],
+      expected_marker_ids: ['next_prompt_artifact'],
+      target_artifact_kind_ids: ['next_prompt_artifact'],
+      target_gate_rule_ids: ['step_packet_approval'],
+    },
   ],
   allowed_routes: [
     {
@@ -65,6 +105,20 @@ export const planImplementReviewSwarm = defineSwarm({
       to_agent_id: 'implementer',
       title: 'Planner delegates implementation',
       summary: 'The planner can send an approved prompt candidate to the implementer.',
+    },
+    {
+      id: 'planner_to_tutorial_writer',
+      from_agent_id: 'planner',
+      to_agent_id: 'tutorial_writer',
+      title: 'Planner delegates tutorial writing',
+      summary: 'After an accepted review, the planner can fork a bounded tutorial-writing worker.',
+    },
+    {
+      id: 'planner_to_next_prompt_writer',
+      from_agent_id: 'planner',
+      to_agent_id: 'next_prompt_writer',
+      title: 'Planner delegates next prompt writing',
+      summary: 'After an accepted review, the planner can fork a bounded next-prompt worker.',
     },
   ],
   gate_rules: [
@@ -77,12 +131,31 @@ export const planImplementReviewSwarm = defineSwarm({
       artifact_kind_id: 'prompt_candidate',
       unlocks_route_id: 'planner_to_implementer',
     },
+    {
+      id: 'step_packet_approval',
+      title: 'Step Packet Approval',
+      summary: 'Open a user gate when tutorial and next-prompt artifacts are both ready.',
+      owner_agent_id: 'planner',
+      workflow_gate_ids: ['step_approval_gate'],
+      artifact_kind_id: 'next_prompt_artifact',
+      unlocks_route_id: 'planner_to_implementer',
+    },
   ],
   artifact_kinds: [
     {
       id: 'prompt_candidate',
       title: 'Prompt Candidate',
       summary: 'The implementer-ready prompt proposed by the planner and shown at the approval gate.',
+    },
+    {
+      id: 'tutorial_artifact',
+      title: 'Tutorial Artifact',
+      summary: 'The user-facing tutorial produced after an accepted implementation step.',
+    },
+    {
+      id: 'next_prompt_artifact',
+      title: 'Next Prompt Artifact',
+      summary: 'The next implementer-ready prompt produced after an accepted implementation step.',
     },
   ],
 });

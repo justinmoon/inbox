@@ -17,9 +17,10 @@ test('plan-implement-review swarm validates cleanly and exposes machine-readable
 
   assert.equal(summary.length, 1);
   assert.equal(summary[0]?.id, 'plan-implement-review');
-  assert.equal(summary[0]?.agent_count, 2);
-  assert.equal(summary[0]?.route_count, 1);
-  assert.equal(summary[0]?.gate_rule_count, 1);
+  assert.equal(summary[0]?.agent_count, 4);
+  assert.equal(summary[0]?.route_count, 3);
+  assert.equal(summary[0]?.gate_rule_count, 2);
+  assert.equal(summary[0]?.artifact_kind_count, 3);
   assert.equal(summary[0]?.validation.valid, true);
 
   assert.ok(detail);
@@ -28,10 +29,22 @@ test('plan-implement-review swarm validates cleanly and exposes machine-readable
   assert.equal(detail?.agents[0]?.review_role_prompt?.includes('evaluating implementer output'), true);
   assert.equal(detail?.agents[0]?.expected_marker_ids.includes('review_fixup_required'), true);
   assert.equal(detail?.agents[0]?.target_gate_rule_ids[0], 'prompt_candidate_approval');
-  assert.equal(detail?.allowed_routes[0]?.id, 'planner_to_implementer');
+  assert.equal(detail?.agents.some((agent) => agent.id === 'tutorial_writer'), true);
+  assert.equal(detail?.agents.some((agent) => agent.id === 'next_prompt_writer'), true);
+  assert.equal(detail?.agents.find((agent) => agent.id === 'tutorial_writer')?.role_prompt.includes('tutorial writer worker'), true);
+  assert.equal(detail?.agents.find((agent) => agent.id === 'next_prompt_writer')?.expected_marker_ids.includes('next_prompt_artifact'), true);
+  assert.equal(detail?.allowed_routes.some((route) => route.id === 'planner_to_implementer'), true);
+  assert.equal(detail?.allowed_routes.some((route) => route.id === 'planner_to_tutorial_writer'), true);
+  assert.equal(detail?.allowed_routes.some((route) => route.id === 'planner_to_next_prompt_writer'), true);
   assert.equal(detail?.gate_rules[0]?.artifact_kind_id, 'prompt_candidate');
   assert.equal(detail?.gate_rules[0]?.unlocks_route_id, 'planner_to_implementer');
+  assert.equal(detail?.gate_rules[1]?.artifact_kind_id, 'next_prompt_artifact');
+  assert.equal(detail?.gate_rules[1]?.unlocks_route_id, 'planner_to_implementer');
+  assert.equal(detail?.artifact_kinds.some((artifact) => artifact.id === 'tutorial_artifact'), true);
+  assert.equal(detail?.artifact_kinds.some((artifact) => artifact.id === 'next_prompt_artifact'), true);
   assert.equal(detail?.mermaid.includes('Planner'), true);
+  assert.equal(detail?.mermaid.includes('Tutorial Writer'), true);
+  assert.equal(detail?.mermaid.includes('Next Prompt Writer'), true);
   assert.equal(detail?.mermaid.includes('approve via Planner delegates implementation'), true);
 });
 
@@ -128,5 +141,14 @@ test('gate rules resolve explicitly to their unlocked route and target agent', (
   const resolved = resolveSwarmGateRuleRoute(planImplementReviewSwarm, gateRule);
   assert.equal(resolved.route?.id, 'planner_to_implementer');
   assert.equal(resolved.route?.title, 'Planner delegates implementation');
+  assert.equal(resolved.target_agent_id, 'implementer');
+});
+
+test('step-packet gate rules map explicitly to the implementer route', () => {
+  const gateRule = getSwarmGateRule(planImplementReviewSwarm, 'step_packet_approval');
+  assert.ok(gateRule);
+
+  const resolved = resolveSwarmGateRuleRoute(planImplementReviewSwarm, gateRule);
+  assert.equal(resolved.route?.id, 'planner_to_implementer');
   assert.equal(resolved.target_agent_id, 'implementer');
 });

@@ -846,3 +846,108 @@ Still missing:
 - any generic swarm scheduler or peer-mesh routing model
 
 The detailed workflow file still remains the execution truth. The swarm layer now owns more agent policy, but it is still not the scheduler or full runtime engine.
+
+## Artifact Worker Roles
+
+The hub-and-spoke swarm now includes two bounded post-review workers:
+
+- `tutorial_writer`
+  - produces the explicit `tutorial_artifact`
+  - owns lightweight tutorial-writing role policy in the swarm definition
+- `next_prompt_writer`
+  - produces the explicit `next_prompt_artifact`
+  - owns lightweight next-step prompt policy in the swarm definition
+
+The swarm definition now carries enough worker policy to describe:
+
+- each worker’s role prompt
+- operating guidelines
+- expected output markers
+- target artifact kind
+- target gate rule
+
+This keeps more of the “programming” for post-review worker behavior in the swarm layer without replacing the detailed workflow execution file yet.
+
+## Minimal Artifact Model
+
+The runtime now persists a minimal artifact record:
+
+- `WorkflowArtifactRecord`
+  - `id`
+  - `run_id`
+  - `workflow_id`
+  - `kind`
+  - `status`
+  - `state_id`
+  - `session_id`
+  - `thread_id`
+  - `turn_id`
+  - `content`
+  - `created_at`
+  - `updated_at`
+  - `completed_at`
+  - `tags`
+  - `metadata`
+
+This is intentionally small. It is enough to:
+
+- inspect which worker produced which artifact
+- show artifact content in the workflow route
+- attach artifact ids/content to later user gates
+- support later landing / export work without inventing a large artifact framework first
+
+Because artifact workers can complete concurrently, the JSON-backed runtime stores now serialize mutations per store instance instead of relying on best-effort temp-file writes alone.
+
+## Executable Accepted-Review To Step-Approval Path
+
+The workflow runtime now executes the next real post-review slice:
+
+- accepted review
+  - transitions into `artifact_forking`
+- `artifact_forking`
+  - planner hub forks two bounded worker sessions from planner context
+  - tutorial worker runs the `tutorial` prompt
+  - next-prompt worker runs the `next_prompt` prompt
+- explicit marker parsing
+  - `<tutorial>...</tutorial>` persists the tutorial artifact
+  - `<next_prompt>...</next_prompt>` persists the next-prompt artifact
+- once both artifacts are ready
+  - transition into `step_approval`
+  - open `step_approval_gate`
+  - attach tutorial and next-prompt artifact ids/content to the gate metadata
+
+The workflow route now shows a real step-approval packet with:
+
+- accepted prompt context
+- tutorial artifact
+- next prompt artifact
+- explicit approve / redirect / finish / abort actions
+
+## Browser Validation Coverage
+
+`scripts/validateBrowser.ts` now proves the first full prompt-approval packet path end to end:
+
+- create run
+- planning conversation
+- first prompt approval
+- implementer execution
+- accepted review
+- tutorial worker completion
+- next-prompt worker completion
+- transition into `step_approval`
+- tutorial and next prompt visible in the workflow UI
+
+This means the workflow-runtime route is now validated through the first real artifact-worker packet, not just through the accepted-review boundary.
+
+## Remaining Gaps Before Later Loops And Landing Flows
+
+Still intentionally missing:
+
+- answering the `step_approval` gate into another full loop in browser validation
+- later landing / publish flows that consume tutorial and next-prompt artifacts
+- tutorial execution beyond one bounded worker output
+- PR / branch / fork artifact workers
+- restart recovery for in-flight artifact workers
+- collapsing more of the detailed workflow file into a smaller swarm-policy-plus-gates execution model
+
+The detailed workflow file still remains execution truth. The swarm layer now owns more role policy and worker behavior, but there is still no generic scheduler, peer mesh, or broad artifact engine.

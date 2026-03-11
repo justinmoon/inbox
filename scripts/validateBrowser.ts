@@ -1024,20 +1024,31 @@ async function assertWorkflowImplementingSurface(runId: string) {
   );
 }
 
-async function waitForWorkflowAcceptedReviewBoundary(runId: string) {
+async function waitForWorkflowStepApprovalSurface(runId: string) {
   const detail = await waitForWorkflowRunDetail(
     runId,
     (nextDetail) =>
-      nextDetail.run?.current_state_id === 'artifact_forking' &&
-      nextDetail.swarm?.top_level_state === 'working' &&
+      nextDetail.run?.current_state_id === 'step_approval' &&
+      nextDetail.swarm?.top_level_state === 'needs_user_input' &&
       Array.isArray(nextDetail.open_gates) &&
-      nextDetail.open_gates.length === 0 &&
+      nextDetail.open_gates.length > 0 &&
+      Array.isArray(nextDetail.artifacts) &&
+      nextDetail.artifacts.some(
+        (artifact: Record<string, any>) =>
+          artifact.kind === 'tutorial_artifact' && artifact.status === 'ready' && artifact.content,
+      ) &&
+      nextDetail.artifacts.some(
+        (artifact: Record<string, any>) =>
+          artifact.kind === 'next_prompt_artifact' && artifact.status === 'ready' && artifact.content,
+      ) &&
       Array.isArray(nextDetail.events) &&
       nextDetail.events.some((event: Record<string, any>) => event.type === 'implementer_turn_completed') &&
       nextDetail.events.some((event: Record<string, any>) => event.type === 'review_turn_started') &&
       nextDetail.events.some((event: Record<string, any>) => event.type === 'review_turn_completed') &&
-      nextDetail.events.some((event: Record<string, any>) => event.type === 'review_result_detected'),
-    'reach the accepted review boundary',
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'review_result_detected') &&
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'tutorial_artifact_persisted') &&
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'next_prompt_artifact_persisted'),
+    'reach the step approval gate',
     300_000,
   );
 
@@ -1062,17 +1073,19 @@ async function waitForWorkflowAcceptedReviewBoundary(runId: string) {
       '(async () => {',
       '  const deadline = Date.now() + 30000;',
       '  while (Date.now() < deadline) {',
-      "    const surface = document.querySelector('[data-workflow-primary-surface=\"background\"]');",
+      "    const surface = document.querySelector('[data-workflow-primary-surface=\"step_approval\"]');",
       "    const topLevel = document.querySelector('[data-swarm-top-level-state]')?.getAttribute('data-swarm-top-level-state');",
       "    const currentState = document.querySelector('[data-workflow-current-state]')?.getAttribute('data-workflow-current-state');",
       "    const gate = document.querySelector('[data-swarm-current-gate]');",
+      "    const tutorial = document.querySelector('[data-workflow-step-tutorial=\"true\"] code')?.textContent?.trim() ?? '';",
+      "    const nextPrompt = document.querySelector('[data-workflow-step-next-prompt=\"true\"] code')?.textContent?.trim() ?? '';",
       "    const timelineTitles = [...document.querySelectorAll('[data-workflow-timeline-entry]')].map((node) => node.getAttribute('data-workflow-timeline-entry'));",
-      "    if (surface && topLevel === 'working' && currentState === 'artifact_forking' && !gate && timelineTitles.includes('Implementer turn completed') && timelineTitles.includes('Planner review started') && timelineTitles.includes('Planner review completed') && timelineTitles.includes('Review result detected')) {",
+      "    if (surface && topLevel === 'needs_user_input' && currentState === 'step_approval' && gate && tutorial && nextPrompt && timelineTitles.includes('Review result detected') && timelineTitles.includes('Tutorial worker turn started') && timelineTitles.includes('Tutorial artifact persisted') && timelineTitles.includes('Next prompt worker turn started') && timelineTitles.includes('Next prompt artifact persisted') && timelineTitles.includes('Gate opened')) {",
       '      return;',
       '    }',
       '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
       '  }',
-      "  throw new Error('Workflow route did not reflect the accepted review boundary honestly.');",
+      "  throw new Error('Workflow route did not reflect the step approval packet honestly.');",
       '})()',
     ].join(' '),
   );
@@ -1125,7 +1138,7 @@ async function assertWorkflowRuntimeRoute(repoPath: string) {
 
   await approveWorkflowGateFromBrowser();
   await assertWorkflowImplementingSurface(runId);
-  await waitForWorkflowAcceptedReviewBoundary(runId);
+  await waitForWorkflowStepApprovalSurface(runId);
 }
 
 await fs.mkdir(importedRoot, { recursive: true });

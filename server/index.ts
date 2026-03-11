@@ -34,6 +34,7 @@ import { AgentSessionStore } from './agentSessionStore.ts';
 import { AppServerCodexClient } from './codexClient.ts';
 import { GateStore } from './gateStore.ts';
 import { RunEventStore } from './runEventStore.ts';
+import { WorkflowArtifactStore } from './workflowArtifactStore.ts';
 import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
 import { WorkflowRunService } from './workflowRunService.ts';
 import { WorkflowRunStore } from './workflowRunStore.ts';
@@ -48,6 +49,7 @@ const workflowRunStore = new WorkflowRunStore(config.runtimeRoot);
 const gateStore = new GateStore(config.runtimeRoot);
 const agentSessionStore = new AgentSessionStore(config.runtimeRoot);
 const runEventStore = new RunEventStore(config.runtimeRoot);
+const workflowArtifactStore = new WorkflowArtifactStore(config.runtimeRoot);
 const liveSessionSubscribers = new Map<string, Set<express.Response>>();
 const workflowRunSubscribers = new Map<string, Set<express.Response>>();
 const liveApprovalStore = new LiveApprovalStore();
@@ -239,6 +241,7 @@ const workflowRunService = new WorkflowRunService({
   gates: gateStore,
   sessions: agentSessionStore,
   events: runEventStore,
+  artifacts: workflowArtifactStore,
   workspaces: workspaceService,
   codex: codexClient,
   codexExecution: {

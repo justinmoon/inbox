@@ -14,6 +14,7 @@ import type {
   AgentTurnStatus,
   GateRecord,
   RunEventRecord,
+  WorkflowArtifactRecord,
   WorkflowRunRecord,
 } from '../shared/workflowRuntime.ts';
 import type { RepositoryRecord, WorkspaceRecord } from '../shared/workspaces.ts';
@@ -23,6 +24,7 @@ import { GateStore } from './gateStore.ts';
 import { RunEventStore } from './runEventStore.ts';
 import { buildWorkflowRunSwarmView } from './swarmRunView.ts';
 import { SwarmDefinitionService } from './swarmDefinitionService.ts';
+import { WorkflowArtifactStore } from './workflowArtifactStore.ts';
 import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
 import { WorkflowRunStore } from './workflowRunStore.ts';
 import {
@@ -119,6 +121,7 @@ export class WorkflowRunService {
   #gates: GateStore;
   #sessions: AgentSessionStore;
   #events: RunEventStore;
+  #artifacts: WorkflowArtifactStore;
   #swarms: SwarmDefinitionService;
   #workspaces: WorkflowWorkspaceResolver;
   #codex: CodexClient;
@@ -134,6 +137,7 @@ export class WorkflowRunService {
     gates: GateStore;
     sessions: AgentSessionStore;
     events: RunEventStore;
+    artifacts: WorkflowArtifactStore;
     swarms?: SwarmDefinitionService;
     workspaces: WorkflowWorkspaceResolver;
     codex: CodexClient;
@@ -146,6 +150,7 @@ export class WorkflowRunService {
     this.#gates = args.gates;
     this.#sessions = args.sessions;
     this.#events = args.events;
+    this.#artifacts = args.artifacts;
     this.#swarms = args.swarms ?? new SwarmDefinitionService();
     this.#workspaces = args.workspaces;
     this.#codex = args.codex;
@@ -163,6 +168,12 @@ export class WorkflowRunService {
 
   async listRuns() {
     return await this.#runs.listRuns();
+  }
+
+  async waitForIdle() {
+    while (this.#turnTasks.size > 0) {
+      await Promise.allSettled([...this.#turnTasks.values()]);
+    }
   }
 
   async createRun(request: CreateWorkflowRunRequest): Promise<WorkflowRunDetail> {
@@ -396,6 +407,7 @@ export class WorkflowRunService {
     }
 
     const sessions = await this.#sessions.listByRun(runId);
+    const artifacts = await this.#artifacts.listByRun(runId);
     const openGates = (await this.#gates.listByRun(runId)).filter((gate) => gate.status === 'open');
     const events = await this.#events.listByRun(runId);
     const sessionDetails: WorkflowRunSessionDetail[] = await Promise.all(
@@ -419,6 +431,7 @@ export class WorkflowRunService {
     const detail = {
       run,
       sessions: sessionDetails,
+      artifacts,
       open_gates: openGates,
       events,
       swarm: null,
@@ -1676,7 +1689,17 @@ export class WorkflowRunService {
         gateMetadata: {},
       });
 
-      if (reviewStatus === 'accepted' || reviewStatus === 'replan_required') {
+      if (reviewStatus === 'accepted') {
+        await this.#startArtifactWorkers({
+          run: transitionResult.run,
+          plannerSession: session,
+          reviewOutput: latestAssistantText,
+          reviewTurnId: args.turnId,
+        });
+        return;
+      }
+
+      if (reviewStatus === 'replan_required') {
         return;
       }
 
@@ -1798,6 +1821,593 @@ export class WorkflowRunService {
     }
   }
 
+  async #startArtifactWorkers(args: {
+    run: WorkflowRunRecord;
+    plannerSession: AgentSessionRecord;
+    reviewOutput: string;
+    reviewTurnId: string;
+  }) {
+    const preparedPlannerSession: AgentSessionRecord = {
+      ...args.plannerSession,
+      state_id: args.run.current_state_id,
+      active_turn_id: null,
+      active_turn_started_at: null,
+      status: 'active',
+      updated_at: this.#clock(),
+      metadata: {
+        ...args.plannerSession.metadata,
+        ...stringMetadata({
+          prompt_id: 'planner_conversation',
+          last_accepted_review_turn_id: args.reviewTurnId,
+        }),
+      },
+    };
+    await this.#sessions.saveSession(preparedPlannerSession);
+
+    const runtimeContext = await this.#buildArtifactRuntimeContext({
+      run: args.run,
+      reviewOutput: args.reviewOutput,
+    });
+
+    await this.#startArtifactWorker({
+      run: args.run,
+      plannerSession: preparedPlannerSession,
+      worker: 'tutorial_artifact',
+      runtimeContext,
+      reviewTurnId: args.reviewTurnId,
+    });
+
+    const refreshedRun = await this.#requireRun(args.run.id);
+    if (refreshedRun.current_state_id !== 'artifact_forking' || refreshedRun.status !== 'active') {
+      return;
+    }
+
+    await this.#startArtifactWorker({
+      run: refreshedRun,
+      plannerSession: preparedPlannerSession,
+      worker: 'next_prompt_artifact',
+      runtimeContext,
+      reviewTurnId: args.reviewTurnId,
+    });
+  }
+
+  async #buildArtifactRuntimeContext(args: {
+    run: WorkflowRunRecord;
+    reviewOutput: string;
+  }): Promise<Record<string, string | null>> {
+    const implementerSession = await this.#loadImplementerSession(args.run.id);
+    if (!implementerSession?.latest_turn_id) {
+      throw new Error(`Workflow run "${args.run.id}" is missing implementer context for artifact workers.`);
+    }
+
+    const implementerThread = await this.#codex.readThread({
+      threadId: implementerSession.thread_id,
+      includeTurns: true,
+    });
+
+    return {
+      approved_prompt_candidate: implementerSession.metadata.prompt_candidate ?? null,
+      implementer_output: latestAssistantTextForTurn(implementerThread, implementerSession.latest_turn_id),
+      implementer_workspace_path: implementerSession.cwd,
+      implementer_thread_id: implementerSession.thread_id,
+      review_output: args.reviewOutput,
+    };
+  }
+
+  #artifactWorkerConfig(args: {
+    workflowId: string;
+    worker: 'tutorial_artifact' | 'next_prompt_artifact';
+  }) {
+    const swarm = this.#swarms.getDefinition(args.workflowId);
+    if (!swarm) {
+      throw new Error(`Swarm definition "${args.workflowId}" was not found.`);
+    }
+
+    if (args.worker === 'tutorial_artifact') {
+      return {
+        artifactKind: 'tutorial_artifact' as const,
+        agentId: 'tutorial_writer',
+        sessionKind: 'tutorial_writing',
+        promptId: 'tutorial',
+        sessionStartedEventType: 'tutorial_worker_session_started',
+        turnStartedEventType: 'tutorial_worker_turn_started',
+        turnCompletedEventType: 'tutorial_worker_turn_completed',
+        turnFailedEventType: 'tutorial_worker_turn_failed',
+        artifactSavedEventType: 'tutorial_artifact_persisted',
+        sessionStartedSummary: 'Tutorial worker session started from the accepted review.',
+        turnStartedSummary: 'Tutorial worker turn started.',
+        turnCompletedSummary: 'Tutorial worker turn completed.',
+        artifactSavedSummary: 'Tutorial artifact persisted from worker output.',
+        startupFailureSummary: 'Tutorial worker could not start after accepted review.',
+      };
+    }
+
+    return {
+      artifactKind: 'next_prompt_artifact' as const,
+      agentId: 'next_prompt_writer',
+      sessionKind: 'next_prompt_writing',
+      promptId: 'next_prompt',
+      sessionStartedEventType: 'next_prompt_worker_session_started',
+      turnStartedEventType: 'next_prompt_worker_turn_started',
+      turnCompletedEventType: 'next_prompt_worker_turn_completed',
+      turnFailedEventType: 'next_prompt_worker_turn_failed',
+      artifactSavedEventType: 'next_prompt_artifact_persisted',
+      sessionStartedSummary: 'Next-prompt worker session started from the accepted review.',
+      turnStartedSummary: 'Next-prompt worker turn started.',
+      turnCompletedSummary: 'Next-prompt worker turn completed.',
+      artifactSavedSummary: 'Next-prompt artifact persisted from worker output.',
+      startupFailureSummary: 'Next-prompt worker could not start after accepted review.',
+    };
+  }
+
+  async #startArtifactWorker(args: {
+    run: WorkflowRunRecord;
+    plannerSession: AgentSessionRecord;
+    worker: 'tutorial_artifact' | 'next_prompt_artifact';
+    runtimeContext: Record<string, string | null>;
+    reviewTurnId: string;
+  }) {
+    const latestRun = await this.#requireRun(args.run.id);
+    if (latestRun.current_state_id !== 'artifact_forking' || latestRun.status !== 'active') {
+      return;
+    }
+
+    const config = this.#artifactWorkerConfig({
+      workflowId: latestRun.workflow_id,
+      worker: args.worker,
+    });
+    const definition = this.#loadDefinitionOrThrow(latestRun.workflow_id);
+    const prompt = getWorkflowPrompt(definition, config.promptId);
+    if (!prompt) {
+      throw new Error(`Prompt "${config.promptId}" was not found in workflow "${definition.id}".`);
+    }
+
+    let session: AgentSessionRecord | null = null;
+    let artifact: WorkflowArtifactRecord | null = null;
+    let threadId: string | null = null;
+
+    try {
+      const forkedThread = await this.#codex.forkThread({
+        threadId: args.plannerSession.thread_id,
+        persistExtendedHistory: true,
+        personality: 'pragmatic',
+      });
+      threadId = forkedThread.threadId;
+
+      const now = this.#clock();
+      session = {
+        id: createId('session', this.#idGenerator),
+        run_id: latestRun.id,
+        workflow_id: latestRun.workflow_id,
+        backend: 'codex',
+        kind: config.sessionKind,
+        actor: config.agentId,
+        state_id: latestRun.current_state_id,
+        thread_id: forkedThread.threadId,
+        workspace_id: args.plannerSession.workspace_id,
+        cwd: args.plannerSession.cwd,
+        active_turn_id: null,
+        active_turn_started_at: null,
+        latest_turn_id: null,
+        latest_turn_completed_at: null,
+        last_turn_status: null,
+        status: 'active',
+        created_at: now,
+        updated_at: now,
+        tags: ['workflow-runtime', 'artifact-worker'],
+        metadata: stringMetadata({
+          prompt_id: prompt.id,
+          parent_thread_id: args.plannerSession.thread_id,
+          artifact_kind: config.artifactKind,
+        }),
+      };
+      await this.#sessions.saveSession(session);
+
+      artifact = {
+        id: createId('artifact', this.#idGenerator),
+        run_id: latestRun.id,
+        workflow_id: latestRun.workflow_id,
+        kind: config.artifactKind,
+        status: 'pending',
+        state_id: latestRun.current_state_id,
+        session_id: session.id,
+        thread_id: session.thread_id,
+        turn_id: null,
+        content: null,
+        created_at: now,
+        updated_at: now,
+        completed_at: null,
+        tags: ['workflow-runtime', 'artifact'],
+        metadata: stringMetadata({
+          prompt_id: prompt.id,
+          approved_prompt_candidate: args.runtimeContext.approved_prompt_candidate ?? null,
+          source_review_turn_id: args.reviewTurnId,
+        }),
+      };
+      await this.#artifacts.saveArtifact(artifact);
+
+      await this.#recordEvent({
+        run: latestRun,
+        type: config.sessionStartedEventType,
+        summary: config.sessionStartedSummary,
+        state_id: latestRun.current_state_id,
+        session_id: session.id,
+        thread_id: session.thread_id,
+        metadata: stringMetadata({
+          artifact_id: artifact.id,
+          artifact_kind: artifact.kind,
+          prompt_id: prompt.id,
+        }),
+      });
+
+      const turn = await this.#codex.startTurn({
+        threadId: session.thread_id,
+        text: prompt.render({
+          run: latestRun,
+          runtime_context: args.runtimeContext,
+        }),
+        cwd: session.cwd,
+        ...this.#codexExecution,
+      });
+
+      const updatedSession: AgentSessionRecord = {
+        ...session,
+        active_turn_id: turn.turnId,
+        active_turn_started_at: this.#clock(),
+        updated_at: this.#clock(),
+      };
+      await this.#sessions.saveSession(updatedSession);
+      await this.#artifacts.saveArtifact({
+        ...artifact,
+        turn_id: turn.turnId,
+        updated_at: this.#clock(),
+      });
+
+      this.#scheduleArtifactWorkerWatcher({
+        runId: latestRun.id,
+        sessionId: updatedSession.id,
+        promptId: prompt.id,
+        turnId: turn.turnId,
+        artifactId: artifact.id,
+        worker: config.artifactKind,
+      });
+
+      await this.#recordEvent({
+        run: latestRun,
+        type: config.turnStartedEventType,
+        summary: config.turnStartedSummary,
+        state_id: latestRun.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: turn.turnId,
+        metadata: stringMetadata({
+          artifact_id: artifact.id,
+          artifact_kind: artifact.kind,
+          prompt_id: prompt.id,
+        }),
+      });
+    } catch (error) {
+      if (artifact) {
+        await this.#artifacts.saveArtifact({
+          ...artifact,
+          status: 'failed',
+          updated_at: this.#clock(),
+          completed_at: this.#clock(),
+        });
+      }
+      await this.#transitionRunToFailed({
+        runId: latestRun.id,
+        sessionId: session?.id ?? null,
+        threadId: threadId ?? session?.thread_id ?? null,
+        turnId: artifact?.turn_id ?? null,
+        eventType: 'artifact_worker_startup_failed',
+        summary: config.startupFailureSummary,
+        error,
+        transitionEvent: 'artifacts.failed',
+      });
+    }
+  }
+
+  #scheduleArtifactWorkerWatcher(args: {
+    runId: string;
+    sessionId: string;
+    promptId: string;
+    turnId: string;
+    artifactId: string;
+    worker: 'tutorial_artifact' | 'next_prompt_artifact';
+  }) {
+    const key = `${args.sessionId}:${args.turnId}`;
+    if (this.#turnTasks.has(key)) {
+      return;
+    }
+
+    const task = this.#waitForArtifactWorkerCompletion(args)
+      .catch(async (error) => {
+        const config = this.#artifactWorkerConfig({
+          workflowId: (await this.#requireRun(args.runId)).workflow_id,
+          worker: args.worker,
+        });
+        await this.#transitionRunToFailed({
+          runId: args.runId,
+          sessionId: args.sessionId,
+          turnId: args.turnId,
+          eventType: config.turnFailedEventType,
+          summary: `${config.turnCompletedSummary.replace('completed', 'failed after starting')}.`,
+          error,
+          transitionEvent: 'artifacts.failed',
+        });
+      })
+      .finally(() => {
+        this.#turnTasks.delete(key);
+      });
+
+    this.#turnTasks.set(key, task);
+  }
+
+  async #waitForArtifactWorkerCompletion(args: {
+    runId: string;
+    sessionId: string;
+    promptId: string;
+    turnId: string;
+    artifactId: string;
+    worker: 'tutorial_artifact' | 'next_prompt_artifact';
+  }) {
+    const completion = await this.#codex.waitForTurnCompletion({
+      threadId: (await this.#requireSession(args.sessionId)).thread_id,
+      turnId: args.turnId,
+    });
+
+    const session = await this.#requireSession(args.sessionId);
+    const artifact = await this.#requireArtifact(args.artifactId);
+    const run = await this.#requireRun(args.runId);
+    const config = this.#artifactWorkerConfig({
+      workflowId: run.workflow_id,
+      worker: args.worker,
+    });
+    const completedAt = this.#clock();
+    const updatedSession: AgentSessionRecord = {
+      ...session,
+      active_turn_id: session.active_turn_id === args.turnId ? null : session.active_turn_id,
+      active_turn_started_at: session.active_turn_id === args.turnId ? null : session.active_turn_started_at,
+      latest_turn_id: args.turnId,
+      latest_turn_completed_at: completedAt,
+      last_turn_status: normalizeTurnStatus(completion.status),
+      status: completion.status === 'completed' ? 'completed' : 'failed',
+      updated_at: completedAt,
+    };
+    await this.#sessions.saveSession(updatedSession);
+
+    if (completion.status !== 'completed') {
+      await this.#artifacts.saveArtifact({
+        ...artifact,
+        status: 'failed',
+        updated_at: completedAt,
+        completed_at: completedAt,
+      });
+
+      await this.#recordEvent({
+        run,
+        type: config.turnFailedEventType,
+        summary: `${config.turnCompletedSummary.replace('completed', `finished with status "${completion.status}"`)}`,
+        state_id: run.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: args.turnId,
+        metadata: stringMetadata({
+          artifact_id: artifact.id,
+          artifact_kind: artifact.kind,
+          status: completion.status,
+        }),
+      });
+
+      await this.#transitionRunToFailed({
+        runId: run.id,
+        sessionId: updatedSession.id,
+        threadId: updatedSession.thread_id,
+        turnId: args.turnId,
+        eventType: 'artifact_runtime_failed',
+        summary: `${config.turnCompletedSummary.replace('completed', `completed with status "${completion.status}"`)}`,
+        error: new Error(`Artifact worker turn ${args.turnId} finished with status "${completion.status}".`),
+        transitionEvent: 'artifacts.failed',
+      });
+      return;
+    }
+
+    await this.#recordEvent({
+      run,
+      type: config.turnCompletedEventType,
+      summary: config.turnCompletedSummary,
+      state_id: run.current_state_id,
+      session_id: updatedSession.id,
+      thread_id: updatedSession.thread_id,
+      turn_id: args.turnId,
+      metadata: stringMetadata({
+        artifact_id: artifact.id,
+        artifact_kind: artifact.kind,
+      }),
+    });
+
+    const thread = await this.#codex.readThread({
+      threadId: updatedSession.thread_id,
+      includeTurns: true,
+    });
+
+    await this.#applyArtifactWorkerOutcome({
+      runId: run.id,
+      sessionId: updatedSession.id,
+      definitionId: run.workflow_id,
+      promptId: args.promptId,
+      turnId: args.turnId,
+      thread,
+      artifactId: artifact.id,
+      worker: args.worker,
+    });
+  }
+
+  async #applyArtifactWorkerOutcome(args: {
+    runId: string;
+    sessionId: string;
+    definitionId: string;
+    promptId: string;
+    turnId: string;
+    thread: CodexThread;
+    artifactId: string;
+    worker: 'tutorial_artifact' | 'next_prompt_artifact';
+  }) {
+    const run = await this.#requireRun(args.runId);
+    const session = await this.#requireSession(args.sessionId);
+    const artifact = await this.#requireArtifact(args.artifactId);
+    const config = this.#artifactWorkerConfig({
+      workflowId: run.workflow_id,
+      worker: args.worker,
+    });
+    const definition = this.#loadDefinitionOrThrow(args.definitionId);
+    const prompt = getWorkflowPrompt(definition, args.promptId);
+    if (!prompt) {
+      throw new Error(`Prompt "${args.promptId}" was not found in workflow "${definition.id}".`);
+    }
+
+    const latestAssistantText = latestAssistantTextForTurn(args.thread, args.turnId);
+    if (!latestAssistantText) {
+      await this.#artifacts.saveArtifact({
+        ...artifact,
+        status: 'failed',
+        updated_at: this.#clock(),
+        completed_at: this.#clock(),
+      });
+      await this.#transitionRunToFailed({
+        runId: run.id,
+        sessionId: session.id,
+        threadId: session.thread_id,
+        turnId: args.turnId,
+        eventType: 'artifact_output_missing',
+        summary: `${config.artifactSavedSummary.replace('persisted from worker output', 'completed without artifact output')}`,
+        error: new Error('Artifact worker did not emit an assistant artifact.'),
+        transitionEvent: 'artifacts.failed',
+      });
+      return;
+    }
+
+    for (const parserHookId of prompt.parser_hook_ids) {
+      const parserHook = getWorkflowParserHook(definition, parserHookId);
+      if (!parserHook) {
+        continue;
+      }
+
+      const parserResult = parserHook.parse(latestAssistantText);
+      if (typeof parserResult !== 'string' || !parserResult.trim()) {
+        continue;
+      }
+
+      const readyArtifact: WorkflowArtifactRecord = {
+        ...artifact,
+        status: 'ready',
+        content: parserResult.trim(),
+        updated_at: this.#clock(),
+        completed_at: this.#clock(),
+        metadata: {
+          ...artifact.metadata,
+          ...stringMetadata({ parser_hook_id: parserHook.id }),
+        },
+      };
+      await this.#artifacts.saveArtifact(readyArtifact);
+
+      await this.#recordEvent({
+        run,
+        type: config.artifactSavedEventType,
+        summary: config.artifactSavedSummary,
+        state_id: run.current_state_id,
+        session_id: session.id,
+        thread_id: session.thread_id,
+        turn_id: args.turnId,
+        metadata: stringMetadata({
+          artifact_id: readyArtifact.id,
+          artifact_kind: readyArtifact.kind,
+          parser_hook_id: parserHook.id,
+        }),
+      });
+
+      await this.#maybeAdvanceArtifactForking(run.id);
+      return;
+    }
+
+    await this.#artifacts.saveArtifact({
+      ...artifact,
+      status: 'failed',
+      updated_at: this.#clock(),
+      completed_at: this.#clock(),
+    });
+    await this.#transitionRunToFailed({
+      runId: run.id,
+      sessionId: session.id,
+      threadId: session.thread_id,
+      turnId: args.turnId,
+      eventType: 'artifact_marker_not_found',
+      summary: `${config.artifactSavedSummary.replace('persisted from worker output', 'completed without an explicit artifact marker')}`,
+      error: new Error('Artifact worker did not emit an explicit artifact marker.'),
+      transitionEvent: 'artifacts.failed',
+    });
+  }
+
+  async #maybeAdvanceArtifactForking(runId: string) {
+    const run = await this.#requireRun(runId);
+    if (run.current_state_id !== 'artifact_forking' || run.status !== 'active') {
+      return;
+    }
+
+    const tutorialArtifact = await this.#loadLatestArtifact(runId, 'tutorial_artifact');
+    const nextPromptArtifact = await this.#loadLatestArtifact(runId, 'next_prompt_artifact');
+    if (!tutorialArtifact || !nextPromptArtifact) {
+      return;
+    }
+
+    const definition = this.#loadDefinitionOrThrow(run.workflow_id);
+    const transition = findWorkflowTransition(definition, {
+      fromStateId: run.current_state_id,
+      event: 'artifacts.ready',
+    });
+    if (!transition) {
+      throw new Error(`Workflow "${definition.id}" has no transition for event "artifacts.ready".`);
+    }
+
+    const plannerSession = await this.#loadPlanningSession(run.id);
+    if (plannerSession) {
+      await this.#sessions.saveSession({
+        ...plannerSession,
+        state_id: 'step_approval',
+        updated_at: this.#clock(),
+        metadata: {
+          ...plannerSession.metadata,
+          ...stringMetadata({
+            prompt_id: 'planner_conversation',
+          }),
+        },
+      });
+    }
+
+    await this.#transitionRun({
+      run,
+      transition,
+      sessionId: plannerSession?.id ?? null,
+      threadId: plannerSession?.thread_id ?? null,
+      metadata: stringMetadata({
+        tutorial_artifact_id: tutorialArtifact.id,
+        next_prompt_artifact_id: nextPromptArtifact.id,
+      }),
+      gateMetadata: stringMetadata({
+        tutorial_artifact_id: tutorialArtifact.id,
+        tutorial_artifact_content: tutorialArtifact.content,
+        next_prompt_artifact_id: nextPromptArtifact.id,
+        next_prompt_artifact_content: nextPromptArtifact.content,
+        prompt_candidate: nextPromptArtifact.content,
+        approved_prompt_candidate:
+          nextPromptArtifact.metadata.approved_prompt_candidate ??
+          tutorialArtifact.metadata.approved_prompt_candidate ??
+          null,
+      }),
+    });
+  }
+
   async #createGatesForState(args: {
     run: WorkflowRunRecord;
     state: ReturnType<typeof getWorkflowState> extends infer T ? Exclude<T, null> : never;
@@ -1846,6 +2456,14 @@ export class WorkflowRunService {
   async #loadImplementerSession(runId: string) {
     const sessions = await this.#sessions.listByRun(runId);
     return sessions.findLast((session) => session.actor === 'implementer') ?? null;
+  }
+
+  async #loadLatestArtifact(
+    runId: string,
+    kind: 'tutorial_artifact' | 'next_prompt_artifact',
+  ) {
+    const artifacts = await this.#artifacts.listByRun(runId);
+    return artifacts.findLast((artifact) => artifact.kind === kind && artifact.status === 'ready') ?? null;
   }
 
   async #transitionRunToFailed(args: {
@@ -1948,6 +2566,14 @@ export class WorkflowRunService {
       throw new Error(`Workflow session "${sessionId}" was not found.`);
     }
     return session;
+  }
+
+  async #requireArtifact(artifactId: string) {
+    const artifact = await this.#artifacts.getArtifact(artifactId);
+    if (!artifact) {
+      throw new Error(`Workflow artifact "${artifactId}" was not found.`);
+    }
+    return artifact;
   }
 
   async #recordEvent(args: {

@@ -204,6 +204,16 @@ function eventTitle(event: RunEventRecord) {
     implementer_turn_started: 'Implementer turn started',
     implementer_turn_completed: 'Implementer turn completed',
     implementer_turn_failed: 'Implementer turn failed',
+    tutorial_worker_session_started: 'Tutorial worker session started',
+    tutorial_worker_turn_started: 'Tutorial worker turn started',
+    tutorial_worker_turn_completed: 'Tutorial worker turn completed',
+    tutorial_worker_turn_failed: 'Tutorial worker turn failed',
+    tutorial_artifact_persisted: 'Tutorial artifact persisted',
+    next_prompt_worker_session_started: 'Next prompt worker session started',
+    next_prompt_worker_turn_started: 'Next prompt worker turn started',
+    next_prompt_worker_turn_completed: 'Next prompt worker turn completed',
+    next_prompt_worker_turn_failed: 'Next prompt worker turn failed',
+    next_prompt_artifact_persisted: 'Next prompt artifact persisted',
   };
 
   return labels[event.type] ?? humanizeToken(event.type);
@@ -217,6 +227,9 @@ function eventEmphasis(event: RunEventRecord): SwarmTimelineEntry['emphasis'] {
     return 'turn';
   }
   if (event.type.includes('marker') || event.type === 'review_result_detected') {
+    return 'marker';
+  }
+  if (event.type.endsWith('_artifact_persisted')) {
     return 'marker';
   }
   if (event.type.startsWith('gate_')) {

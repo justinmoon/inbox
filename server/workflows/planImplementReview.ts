@@ -82,6 +82,8 @@ function firstMarkerContent(text: string, markerId: string) {
 }
 
 const plannerAgent = planImplementReviewSwarm.agents.find((agent) => agent.id === 'planner');
+const tutorialWriterAgent = planImplementReviewSwarm.agents.find((agent) => agent.id === 'tutorial_writer');
+const nextPromptWriterAgent = planImplementReviewSwarm.agents.find((agent) => agent.id === 'next_prompt_writer');
 const promptCandidateGateRule = planImplementReviewSwarm.gate_rules.find(
   (gateRule) => gateRule.id === 'prompt_candidate_approval',
 );
@@ -89,7 +91,13 @@ const promptCandidateArtifact = planImplementReviewSwarm.artifact_kinds.find(
   (artifactKind) => artifactKind.id === 'prompt_candidate',
 );
 
-if (!plannerAgent || !promptCandidateGateRule || !promptCandidateArtifact) {
+if (
+  !plannerAgent ||
+  !tutorialWriterAgent ||
+  !nextPromptWriterAgent ||
+  !promptCandidateGateRule ||
+  !promptCandidateArtifact
+) {
   throw new Error('plan-implement-review swarm definition is missing required agents or gate metadata.');
 }
 
@@ -115,6 +123,21 @@ function renderReviewPolicyLines(agent: {
     ...agent.review_guidelines.map((guideline) => `- ${guideline}`),
     '',
     `Expected review markers: ${agent.expected_marker_ids.filter((markerId) => markerId.startsWith('review_')).join(', ')}`,
+  ];
+}
+
+function renderArtifactWorkerPolicyLines(agent: {
+  role_prompt: string;
+  operating_guidelines: string[];
+  expected_marker_ids: string[];
+}) {
+  return [
+    agent.role_prompt,
+    '',
+    'Operating guidelines:',
+    ...agent.operating_guidelines.map((guideline) => `- ${guideline}`),
+    '',
+    `Expected artifact marker: ${agent.expected_marker_ids.join(', ')}`,
   ];
 }
 
@@ -525,20 +548,29 @@ export const planImplementReviewWorkflow = defineWorkflow({
     },
     {
       id: 'tutorial',
-      actor_label: 'planner/reviewer',
+      actor_label: 'tutorial_writer',
       title: 'Tutorial Artifact Prompt',
       description: 'Used after an accepted review to turn the finished step into a user-facing tutorial artifact.',
       used_in_state_ids: ['artifact_forking'],
       output_marker_ids: ['tutorial_artifact'],
       parser_hook_ids: ['parse_tutorial_artifact'],
-      render({ run }) {
+      render({ run, runtime_context }) {
         return [
-          ...renderAgentPolicyLines(plannerAgent),
+          ...renderArtifactWorkerPolicyLines(tutorialWriterAgent),
           '',
           'Produce the user-facing tutorial artifact for the accepted implementation step.',
           '',
           'Goal:',
           run.goal_prompt,
+          '',
+          'Approved prompt candidate:',
+          runtimeContextValue(runtime_context, 'approved_prompt_candidate', 'Unavailable.'),
+          '',
+          'Implementer output:',
+          runtimeContextValue(runtime_context, 'implementer_output', 'Implementer output unavailable.'),
+          '',
+          'Accepted review context:',
+          runtimeContextValue(runtime_context, 'review_output', 'Accepted review output unavailable.'),
           '',
           'Emit exactly one artifact using:',
           '<tutorial>',
@@ -549,21 +581,30 @@ export const planImplementReviewWorkflow = defineWorkflow({
     },
     {
       id: 'next_prompt',
-      actor_label: 'planner/reviewer',
+      actor_label: 'next_prompt_writer',
       title: 'Next Prompt Artifact Prompt',
       description:
         'Used after an accepted review to propose the next implementer prompt as an explicit artifact for user approval.',
       used_in_state_ids: ['artifact_forking'],
       output_marker_ids: ['next_prompt_artifact'],
       parser_hook_ids: ['parse_next_prompt_artifact'],
-      render({ run }) {
+      render({ run, runtime_context }) {
         return [
-          ...renderAgentPolicyLines(plannerAgent),
+          ...renderArtifactWorkerPolicyLines(nextPromptWriterAgent),
           '',
           'Produce the next implementer prompt for the workflow loop.',
           '',
           'Goal:',
           run.goal_prompt,
+          '',
+          'Approved prompt candidate:',
+          runtimeContextValue(runtime_context, 'approved_prompt_candidate', 'Unavailable.'),
+          '',
+          'Implementer output:',
+          runtimeContextValue(runtime_context, 'implementer_output', 'Implementer output unavailable.'),
+          '',
+          'Accepted review context:',
+          runtimeContextValue(runtime_context, 'review_output', 'Accepted review output unavailable.'),
           '',
           'Emit exactly one artifact using:',
           '<next_prompt>',

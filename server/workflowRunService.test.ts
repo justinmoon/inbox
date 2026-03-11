@@ -10,6 +10,7 @@ import { AgentSessionStore } from './agentSessionStore.ts';
 import type { CodexClient } from './codexClient.ts';
 import { GateStore } from './gateStore.ts';
 import { RunEventStore } from './runEventStore.ts';
+import { WorkflowArtifactStore } from './workflowArtifactStore.ts';
 import type { WorkflowRunUpdate } from './workflowRunService.ts';
 import { WorkflowRunService } from './workflowRunService.ts';
 import { WorkflowDefinitionService } from './workflowDefinitionService.ts';
@@ -109,6 +110,22 @@ class FakeCodexClient implements CodexClient {
     return { threadId: input.threadId };
   }
 
+  async forkThread(input: { threadId: string }) {
+    const sourceThread = this.#threads.get(input.threadId);
+    if (!sourceThread) {
+      throw new Error(`Unknown thread ${input.threadId}`);
+    }
+
+    const threadId = `thr_${this.#nextThread++}`;
+    this.calls.push(`forkThread:${input.threadId}:${threadId}`);
+    this.#threads.set(threadId, {
+      ...structuredClone(sourceThread),
+      id: threadId,
+      turns: structuredClone(sourceThread.turns),
+    });
+    return { threadId };
+  }
+
   async startTurn(input: { threadId: string; text: string }) {
     if (this.#failNextStartTurn) {
       const error = this.#failNextStartTurn;
@@ -196,7 +213,7 @@ class FakeCodexClient implements CodexClient {
     });
   }
 
-  async readThread(input: { threadId: string }) {
+  async readThread(input: { threadId: string; includeTurns?: boolean }) {
     this.calls.push(`readThread:${input.threadId}`);
     const thread = this.#threads.get(input.threadId);
     if (!thread) {
@@ -320,6 +337,7 @@ async function createHarness(turnPlans: TurnPlan[]) {
     gates: new GateStore(rootDir),
     sessions: new AgentSessionStore(rootDir),
     events: new RunEventStore(rootDir),
+    artifacts: new WorkflowArtifactStore(rootDir),
     workspaces,
     codex,
     clock: () => '2026-03-10T00:00:00.000Z',
@@ -383,6 +401,29 @@ async function waitForNoActiveTurn(service: WorkflowRunService, runId: string) {
   throw new Error('Timed out waiting for planner turn to become idle.');
 }
 
+async function waitForSessionsToBecomeIdle(
+  service: WorkflowRunService,
+  runId: string,
+  sessionKinds: string[],
+) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const detail = await service.readRunDetail(runId);
+    if (
+      detail &&
+      sessionKinds.every((kind) => {
+        const session = detail.sessions.find((entry) => entry.session.kind === kind);
+        return session != null && session.session.active_turn_id === null && session.session.latest_turn_id != null;
+      })
+    ) {
+      return detail;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  throw new Error(`Timed out waiting for sessions ${sessionKinds.join(', ')} to become idle.`);
+}
+
 async function moveRunToFirstPromptApproval(harness: Awaited<ReturnType<typeof createHarness>>) {
   const created = await harness.service.createRun({
     workflow_id: 'plan-implement-review',
@@ -428,6 +469,70 @@ async function moveRunToImplementing(harness: Awaited<ReturnType<typeof createHa
     created,
     detail,
     implementerSession,
+  };
+}
+
+async function moveRunToArtifactForking(harness: Awaited<ReturnType<typeof createHarness>>) {
+  const { created } = await moveRunToImplementing(harness);
+
+  const reviewStarted = waitForUpdate(
+    harness.service,
+    (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+  );
+  harness.codex.completeTurn('turn_2', {
+    assistantText: 'Implemented the requested runtime review note.',
+  });
+  await reviewStarted;
+
+  const nextPromptWorkerStarted = waitForUpdate(
+    harness.service,
+    (update) => update.run_id === created.run.id && update.event.type === 'next_prompt_worker_turn_started',
+  );
+  harness.codex.completeTurn('turn_3', {
+    assistantText: '<review_result status="accepted" />',
+  });
+  await nextPromptWorkerStarted;
+
+  const detail = await harness.service.readRunDetail(created.run.id);
+  assert.ok(detail, 'expected run detail after artifact worker startup');
+
+  return {
+    created,
+    detail,
+  };
+}
+
+async function moveRunToStepApproval(harness: Awaited<ReturnType<typeof createHarness>>) {
+  const { created } = await moveRunToArtifactForking(harness);
+
+  const stepApprovalOpened = waitForUpdate(
+    harness.service,
+    (update) =>
+      update.run_id === created.run.id &&
+      update.event.type === 'state_transition' &&
+      update.event.to_state_id === 'step_approval',
+  );
+  harness.codex.completeTurn('turn_4', {
+    assistantText: '<tutorial>Explain the completed runtime step and why it matters.</tutorial>',
+  });
+  harness.codex.completeTurn('turn_5', {
+    assistantText: '<next_prompt>Implement the next bounded runtime step.</next_prompt>',
+  });
+  await stepApprovalOpened;
+  await harness.service.waitForIdle();
+
+  const detail = await waitForSessionsToBecomeIdle(harness.service, created.run.id, [
+    'tutorial_writing',
+    'next_prompt_writing',
+  ]);
+  assert.ok(detail, 'expected run detail after step approval gate opens');
+  const gate = detail.open_gates[0];
+  assert.ok(gate, 'expected the step approval gate to be open');
+
+  return {
+    created,
+    detail,
+    gate,
   };
 }
 
@@ -837,40 +942,202 @@ test('review prompt assembly consumes swarm review policy text', async () => {
   }
 });
 
-test('accepted review transitions to the accepted-review boundary', async () => {
-  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+test('accepted review starts both artifact workers', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
 
   try {
-    const { created } = await moveRunToImplementing(harness);
+    const { created, detail } = await moveRunToArtifactForking(harness);
 
-    const reviewStarted = waitForUpdate(
-      harness.service,
-      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    assert.equal(detail?.run.current_state_id, 'artifact_forking');
+    assert.equal(detail?.run.current_state_family, 'background');
+    assert.equal(detail?.events.some((event) => event.type === 'review_result_detected'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'tutorial_worker_session_started'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'tutorial_worker_turn_started'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'next_prompt_worker_session_started'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'next_prompt_worker_turn_started'), true);
+
+    const tutorialSession = detail?.sessions.find((session) => session.session.kind === 'tutorial_writing');
+    const nextPromptSession = detail?.sessions.find((session) => session.session.kind === 'next_prompt_writing');
+    assert.equal(tutorialSession?.session.active_turn_id, 'turn_4');
+    assert.equal(nextPromptSession?.session.active_turn_id, 'turn_5');
+    assert.match(firstTurnUserMessageText(tutorialSession?.thread, 'turn_4'), /tutorial writer worker/i);
+    assert.match(firstTurnUserMessageText(nextPromptSession?.thread, 'turn_5'), /next-prompt writer worker/i);
+    assert.equal(detail?.artifacts.filter((artifact) => artifact.status === 'pending').length, 2);
+    assert.equal(
+      detail?.swarm?.timeline.some((entry) => entry.title === 'Tutorial worker turn started'),
+      true,
     );
-    harness.codex.completeTurn('turn_2', {
-      assistantText: 'Implemented the requested runtime review note.',
-    });
-    await reviewStarted;
+    assert.equal(
+      detail?.swarm?.timeline.some((entry) => entry.title === 'Next prompt worker turn started'),
+      true,
+    );
+    assert.equal(
+      harness.codex.calls.some((call) => call.startsWith('forkThread:thr_1:')),
+      true,
+    );
+    assert.equal(created.run.id, detail?.run.id);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
 
-    const acceptedTransition = waitForUpdate(
+test('tutorial artifact persists correctly', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
+
+  try {
+    const { created } = await moveRunToArtifactForking(harness);
+
+    const tutorialPersisted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'tutorial_artifact_persisted',
+    );
+    harness.codex.completeTurn('turn_4', {
+      assistantText: '<tutorial>Explain the completed runtime step and why it matters.</tutorial>',
+    });
+    await tutorialPersisted;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const artifact = detail?.artifacts.find((entry) => entry.kind === 'tutorial_artifact');
+
+    assert.equal(artifact?.status, 'ready');
+    assert.equal(artifact?.content, 'Explain the completed runtime step and why it matters.');
+    assert.equal(artifact?.session_id != null, true);
+    assert.equal(artifact?.thread_id != null, true);
+    assert.equal(artifact?.turn_id, 'turn_4');
+    assert.equal(detail?.run.current_state_id, 'artifact_forking');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('next-prompt artifact persists correctly', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
+
+  try {
+    const { created } = await moveRunToArtifactForking(harness);
+
+    const nextPromptPersisted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'next_prompt_artifact_persisted',
+    );
+    harness.codex.completeTurn('turn_5', {
+      assistantText: '<next_prompt>Implement the next bounded runtime step.</next_prompt>',
+    });
+    await nextPromptPersisted;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const artifact = detail?.artifacts.find((entry) => entry.kind === 'next_prompt_artifact');
+
+    assert.equal(artifact?.status, 'ready');
+    assert.equal(artifact?.content, 'Implement the next bounded runtime step.');
+    assert.equal(artifact?.session_id != null, true);
+    assert.equal(artifact?.thread_id != null, true);
+    assert.equal(artifact?.turn_id, 'turn_5');
+    assert.equal(detail?.run.current_state_id, 'artifact_forking');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('step_approval opens only after both artifacts are ready', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
+
+  try {
+    const { created } = await moveRunToArtifactForking(harness);
+
+    harness.codex.completeTurn('turn_4', {
+      assistantText: '<tutorial>Explain the completed runtime step and why it matters.</tutorial>',
+    });
+    await waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'tutorial_artifact_persisted',
+    );
+
+    const beforeNextPrompt = await harness.service.readRunDetail(created.run.id);
+    assert.equal(beforeNextPrompt?.run.current_state_id, 'artifact_forking');
+    assert.equal(beforeNextPrompt?.open_gates.length, 0);
+
+    const stepApprovalOpened = waitForUpdate(
       harness.service,
       (update) =>
         update.run_id === created.run.id &&
         update.event.type === 'state_transition' &&
-        update.event.to_state_id === 'artifact_forking',
+        update.event.to_state_id === 'step_approval',
     );
-    harness.codex.completeTurn('turn_3', {
-      assistantText: '<review_result status="accepted" />',
+    harness.codex.completeTurn('turn_5', {
+      assistantText: '<next_prompt>Implement the next bounded runtime step.</next_prompt>',
     });
-    await acceptedTransition;
+    await stepApprovalOpened;
 
+    const detail = await waitForSessionsToBecomeIdle(harness.service, created.run.id, [
+      'tutorial_writing',
+      'next_prompt_writing',
+    ]);
+    await harness.service.waitForIdle();
+    const gate = detail?.open_gates[0];
+
+    assert.equal(detail?.run.current_state_id, 'step_approval');
+    assert.equal(detail?.run.current_state_family, 'approval');
+    assert.equal(detail?.open_gates.length, 1);
+    assert.equal(gate?.definition_gate_id, 'step_approval_gate');
+    assert.equal(gate?.metadata.tutorial_artifact_content, 'Explain the completed runtime step and why it matters.');
+    assert.equal(gate?.metadata.next_prompt_artifact_content, 'Implement the next bounded runtime step.');
+    assert.equal(gate?.metadata.prompt_candidate, 'Implement the next bounded runtime step.');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('run detail reflects step approval packet data honestly after both artifacts complete', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
+
+  try {
+    const { created } = await moveRunToStepApproval(harness);
     const detail = await harness.service.readRunDetail(created.run.id);
-    assert.equal(detail?.run.current_state_id, 'artifact_forking');
-    assert.equal(detail?.run.current_state_family, 'background');
-    assert.equal(detail?.events.some((event) => event.type === 'review_result_detected'), true);
+
+    assert.ok(detail);
+    assert.equal(detail?.run.current_state_id, 'step_approval');
+    assert.equal(detail?.swarm?.top_level_state, 'needs_user_input');
+    assert.equal(detail?.artifacts.length, 2);
+    assert.equal(detail?.artifacts.every((artifact) => artifact.status === 'ready'), true);
+    assert.equal(detail?.artifacts.some((artifact) => artifact.kind === 'tutorial_artifact'), true);
+    assert.equal(detail?.artifacts.some((artifact) => artifact.kind === 'next_prompt_artifact'), true);
+    assert.equal(detail?.open_gates[0]?.metadata.tutorial_artifact_id != null, true);
+    assert.equal(detail?.open_gates[0]?.metadata.next_prompt_artifact_id != null, true);
+    assert.equal(detail?.open_gates[0]?.metadata.next_prompt_artifact_content, 'Implement the next bounded runtime step.');
     assert.equal(
-      detail?.swarm?.timeline.some((entry) => entry.title === 'Review result detected'),
-      true,
+      detail?.swarm?.current_gate?.artifact?.content,
+      'Implement the next bounded runtime step.',
     );
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
@@ -964,45 +1231,58 @@ test('replan_required returns to planning_conversation', async () => {
   }
 });
 
-test('swarm timeline reflects the review loop honestly', async () => {
-  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+test('swarm timeline reflects the artifact worker lifecycle honestly', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
 
   try {
-    const { created } = await moveRunToImplementing(harness);
+    const { created } = await moveRunToArtifactForking(harness);
 
-    const reviewStarted = waitForUpdate(
-      harness.service,
-      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
-    );
-    harness.codex.completeTurn('turn_2', {
-      assistantText: 'Implemented the requested runtime review note.',
-    });
-    await reviewStarted;
-
-    const acceptedTransition = waitForUpdate(
+    const stepApprovalOpened = waitForUpdate(
       harness.service,
       (update) =>
         update.run_id === created.run.id &&
         update.event.type === 'state_transition' &&
-        update.event.to_state_id === 'artifact_forking',
+        update.event.to_state_id === 'step_approval',
     );
-    harness.codex.completeTurn('turn_3', {
-      assistantText: '<review_result status="accepted" />',
+    harness.codex.completeTurn('turn_4', {
+      assistantText: '<tutorial>Explain the completed runtime step and why it matters.</tutorial>',
     });
-    await acceptedTransition;
+    harness.codex.completeTurn('turn_5', {
+      assistantText: '<next_prompt>Implement the next bounded runtime step.</next_prompt>',
+    });
+    await stepApprovalOpened;
 
-    const detail = await harness.service.readRunDetail(created.run.id);
+    const detail = await waitForSessionsToBecomeIdle(harness.service, created.run.id, [
+      'tutorial_writing',
+      'next_prompt_writing',
+    ]);
+    await harness.service.waitForIdle();
     const timelineTitles = detail?.swarm?.timeline.map((entry) => entry.title) ?? [];
-    assert.equal(timelineTitles.includes('Implementer turn completed'), true);
-    assert.equal(timelineTitles.includes('Planner review started'), true);
-    assert.equal(timelineTitles.includes('Planner review completed'), true);
-    assert.equal(timelineTitles.includes('Review result detected'), true);
+    assert.equal(timelineTitles.includes('Tutorial worker session started'), true);
+    assert.equal(timelineTitles.includes('Tutorial worker turn started'), true);
+    assert.equal(timelineTitles.includes('Tutorial artifact persisted'), true);
+    assert.equal(timelineTitles.includes('Next prompt worker session started'), true);
+    assert.equal(timelineTitles.includes('Next prompt worker turn started'), true);
+    assert.equal(timelineTitles.includes('Next prompt artifact persisted'), true);
+    assert.equal(timelineTitles.includes('Gate opened'), true);
     assert.equal(
-      timelineTitles.indexOf('Implementer turn completed') < timelineTitles.indexOf('Planner review started'),
+      timelineTitles.indexOf('Tutorial worker session started') <
+        timelineTitles.indexOf('Tutorial artifact persisted'),
       true,
     );
     assert.equal(
-      timelineTitles.indexOf('Planner review started') < timelineTitles.indexOf('Review result detected'),
+      timelineTitles.indexOf('Next prompt worker session started') <
+        timelineTitles.indexOf('Next prompt artifact persisted'),
+      true,
+    );
+    assert.equal(
+      timelineTitles.indexOf('Next prompt artifact persisted') < timelineTitles.lastIndexOf('Gate opened'),
       true,
     );
   } finally {
