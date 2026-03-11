@@ -161,6 +161,8 @@ function buildAgentViews(
       status = 'failed';
     } else if (topLevelState === 'needs_user_input' && waitingOnUser) {
       status = 'waiting_on_user';
+    } else if (primarySession?.session.activity_status === 'stalled') {
+      status = 'stalled';
     } else if (primarySession?.session.active_turn_id || (ownsCurrentState && topLevelState === 'working')) {
       status = 'working';
     }
@@ -188,6 +190,8 @@ function eventTitle(event: RunEventRecord) {
     planner_turn_started: 'Planner turn started',
     planner_turn_steered: 'Planner turn updated',
     planner_turn_completed: 'Planner turn completed',
+    planner_turn_timed_out: 'Planner turn timed out',
+    planner_turn_retried: 'Planner turn retried',
     planner_turn_failed: 'Planner turn failed',
     planner_marker_detected: 'Marker detected',
     planner_marker_not_found: 'Marker not found',

@@ -14,6 +14,7 @@ import type {
   ListWorkflowDefinitionsResponse,
   ListWorkflowRunsResponse,
   ListWorkspacesResponse,
+  RetryPlanningResponse,
   RespondApprovalResult,
   WorkflowRunStreamEvent,
 } from '../shared/api.ts';
@@ -249,6 +250,8 @@ const workflowRunService = new WorkflowRunService({
     sandboxPolicy: buildSandboxPolicy(),
     model: config.model,
   },
+  plannerTurnTimeoutMs: config.workflowPlannerTimeoutMs,
+  plannerTurnTimeoutOnceMs: config.workflowPlannerTimeoutOnceMs,
 });
 
 workflowRunService.subscribe((update) => {
@@ -505,6 +508,12 @@ async function answerWorkflowGate(args: {
   message?: string;
 }) {
   return await workflowRunService.answerGate(args);
+}
+
+async function retryWorkflowPlanning(runId: string): Promise<RetryPlanningResponse> {
+  return {
+    detail: await workflowRunService.retryPlanning({ runId }),
+  };
 }
 
 async function respondToApproval(args: {
@@ -880,6 +889,21 @@ app.post('/api/workflow-runs/:id/planning-message', async (req, res) => {
           ? 409
           : 400;
     res.status(status).json({ error: 'workflow_planning_message_failed', message: messageText });
+  }
+});
+
+app.post('/api/workflow-runs/:id/planning-retry', async (req, res) => {
+  try {
+    res.json(await retryWorkflowPlanning(req.params.id));
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : 'Failed to retry the stalled planning turn.';
+    const status =
+      /not found/i.test(messageText)
+        ? 404
+        : /only allowed|missing|stalled|timed out|recoverable/i.test(messageText)
+          ? 409
+          : 400;
+    res.status(status).json({ error: 'workflow_planning_retry_failed', message: messageText });
   }
 });
 

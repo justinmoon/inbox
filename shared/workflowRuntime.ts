@@ -10,10 +10,11 @@ export const gateStatuses = ['open', 'answered', 'dismissed'] as const;
 export const gateKinds = ['approval', 'input_required'] as const;
 export const agentSessionStatuses = ['active', 'completed', 'failed'] as const;
 export const agentTurnStatuses = ['running', 'completed', 'failed', 'interrupted'] as const;
+export const agentSessionActivityStatuses = ['idle', 'running', 'stalled'] as const;
 export const workflowArtifactStatuses = ['pending', 'ready', 'failed'] as const;
 export const swarmAgentKinds = ['hub', 'worker'] as const;
 export const swarmRunTopLevelStates = ['working', 'needs_user_input', 'failed', 'completed'] as const;
-export const swarmRunAgentStatuses = ['idle', 'working', 'waiting_on_user', 'failed'] as const;
+export const swarmRunAgentStatuses = ['idle', 'working', 'stalled', 'waiting_on_user', 'failed'] as const;
 export const swarmTimelineEmphasis = ['session', 'turn', 'marker', 'gate', 'transition', 'system'] as const;
 
 export const workflowRepositoryInputSchema = z
@@ -86,6 +87,10 @@ export const agentSessionSchema = z.object({
   latest_turn_id: z.string().min(1).nullable().default(null),
   latest_turn_completed_at: timestampSchema.nullable().default(null),
   last_turn_status: z.enum(agentTurnStatuses).nullable().default(null),
+  activity_status: z.enum(agentSessionActivityStatuses).default('idle'),
+  stalled_at: timestampSchema.nullable().default(null),
+  stall_reason: z.string().min(1).nullable().default(null),
+  last_error: z.string().min(1).nullable().default(null),
   status: z.enum(agentSessionStatuses),
   created_at: timestampSchema,
   updated_at: timestampSchema,
@@ -136,6 +141,7 @@ export type GateStatus = (typeof gateStatuses)[number];
 export type GateKind = (typeof gateKinds)[number];
 export type AgentSessionStatus = (typeof agentSessionStatuses)[number];
 export type AgentTurnStatus = (typeof agentTurnStatuses)[number];
+export type AgentSessionActivityStatus = (typeof agentSessionActivityStatuses)[number];
 export type WorkflowArtifactStatus = (typeof workflowArtifactStatuses)[number];
 export type SwarmAgentKind = (typeof swarmAgentKinds)[number];
 export type SwarmRunTopLevelState = (typeof swarmRunTopLevelStates)[number];

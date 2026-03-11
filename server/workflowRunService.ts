@@ -70,6 +70,8 @@ type CodexExecutionOptions = {
   model?: string | null;
 };
 
+type PlanningTurnSource = 'initial_prompt' | 'user_message' | 'retry';
+
 export type WorkflowRunUpdate = {
   run_id: string;
   event: RunEventRecord;
@@ -177,6 +179,8 @@ export class WorkflowRunService {
   #clock: Clock;
   #idGenerator: IdGenerator;
   #codexExecution: CodexExecutionOptions;
+  #plannerTurnTimeoutMs: number;
+  #plannerTurnTimeoutOnceMs: number | null;
   #turnTasks = new Map<string, Promise<void>>();
   #runMutationQueues = new Map<string, Promise<void>>();
   #listeners = new Set<WorkflowRunUpdateListener>();
@@ -192,6 +196,8 @@ export class WorkflowRunService {
     workspaces: WorkflowWorkspaceResolver;
     codex: CodexClient;
     codexExecution?: CodexExecutionOptions;
+    plannerTurnTimeoutMs?: number;
+    plannerTurnTimeoutOnceMs?: number | null;
     clock?: Clock;
     idGenerator?: IdGenerator;
   }) {
@@ -205,6 +211,8 @@ export class WorkflowRunService {
     this.#workspaces = args.workspaces;
     this.#codex = args.codex;
     this.#codexExecution = args.codexExecution ?? {};
+    this.#plannerTurnTimeoutMs = args.plannerTurnTimeoutMs ?? 300_000;
+    this.#plannerTurnTimeoutOnceMs = args.plannerTurnTimeoutOnceMs ?? null;
     this.#clock = args.clock ?? timestamp;
     this.#idGenerator = args.idGenerator ?? randomUUID;
   }
@@ -247,6 +255,17 @@ export class WorkflowRunService {
         this.#runMutationQueues.delete(runId);
       }
     }
+  }
+
+  #takePlannerTurnTimeoutMs() {
+    const timeoutMs = this.#plannerTurnTimeoutOnceMs ?? this.#plannerTurnTimeoutMs;
+    this.#plannerTurnTimeoutOnceMs = null;
+    return timeoutMs;
+  }
+
+  #isTurnTimeoutError(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /timeout waiting for turn/i.test(message);
   }
 
   async createRun(request: CreateWorkflowRunRequest): Promise<WorkflowRunDetail> {
@@ -356,6 +375,7 @@ export class WorkflowRunService {
       const steered = await this.#steerPlanningTurn({
         runId: run.id,
         session,
+        promptId,
         message: args.message,
       });
       if (!steered) {
@@ -384,6 +404,106 @@ export class WorkflowRunService {
     const detail = await this.readRunDetail(run.id);
     if (!detail) {
       throw new Error(`Workflow run "${run.id}" could not be reloaded after sending a planning message.`);
+    }
+    return detail;
+  }
+
+  async retryPlanning(args: { runId: string }): Promise<WorkflowRunDetail> {
+    const run = await this.#runs.getRun(args.runId);
+    if (!run) {
+      throw new Error(`Workflow run "${args.runId}" was not found.`);
+    }
+
+    if (run.current_state_id !== 'planning_conversation' || run.status !== 'active') {
+      throw new Error('Planning retry is only allowed while the run is active in planning_conversation.');
+    }
+
+    const session = await this.#loadPlanningSession(run.id);
+    if (!session) {
+      throw new Error(`Workflow run "${args.runId}" does not have an active planning session.`);
+    }
+
+    if (session.activity_status !== 'stalled' || session.stall_reason !== 'timeout') {
+      throw new Error('Planning retry is only allowed after a timed out or stalled planning turn.');
+    }
+
+    const promptId = session.metadata.prompt_id;
+    if (!promptId) {
+      throw new Error(`Planning session "${session.id}" is missing its prompt_id metadata.`);
+    }
+
+    const retryText = session.metadata.last_planning_input_text?.trim();
+    if (session.active_turn_id) {
+      try {
+        await this.#codex.steerTurn({
+          threadId: session.thread_id,
+          turnId: session.active_turn_id,
+          text: retryText || 'Continue the current planning step from the existing thread context.',
+        });
+
+        const resumedSession: AgentSessionRecord = {
+          ...session,
+          activity_status: 'running',
+          stalled_at: null,
+          stall_reason: null,
+          last_error: null,
+          updated_at: this.#clock(),
+          metadata: {
+            ...session.metadata,
+            ...stringMetadata({
+              prompt_id: promptId,
+              last_planning_input_source: 'retry',
+              last_planning_input_text:
+                retryText || 'Continue the current planning step from the existing thread context.',
+            }),
+          },
+        };
+        await this.#sessions.saveSession(resumedSession);
+        if (resumedSession.active_turn_id) {
+          this.#schedulePlanningTurnWatcher({
+            runId: run.id,
+            sessionId: resumedSession.id,
+            promptId,
+            turnId: resumedSession.active_turn_id,
+          });
+        }
+
+        await this.#recordEvent({
+          run,
+          type: 'planner_turn_retried',
+          summary: 'Planner retry resumed the stalled planning turn.',
+          state_id: run.current_state_id,
+          session_id: resumedSession.id,
+          thread_id: resumedSession.thread_id,
+          turn_id: resumedSession.active_turn_id,
+          metadata: stringMetadata({ prompt_id: promptId }),
+        });
+
+        const detail = await this.readRunDetail(run.id);
+        if (!detail) {
+          throw new Error(`Workflow run "${run.id}" could not be reloaded after retrying the planner turn.`);
+        }
+        return detail;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to retry the stalled planner turn.';
+        if (!/expectedturnid|no active turn|invalid request/i.test(message)) {
+          throw error;
+        }
+      }
+    }
+
+    await this.#startPlanningTurn({
+      runId: run.id,
+      sessionId: session.id,
+      promptId,
+      text: retryText || 'Continue the current planning step from the existing thread context.',
+      source: 'retry',
+      shouldResumeThread: true,
+    });
+
+    const detail = await this.readRunDetail(run.id);
+    if (!detail) {
+      throw new Error(`Workflow run "${run.id}" could not be reloaded after retrying the planner turn.`);
     }
     return detail;
   }
@@ -691,6 +811,10 @@ export class WorkflowRunService {
         latest_turn_id: null,
         latest_turn_completed_at: null,
         last_turn_status: null,
+        activity_status: 'idle',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         status: 'active',
         created_at: now,
         updated_at: now,
@@ -698,6 +822,7 @@ export class WorkflowRunService {
         metadata: stringMetadata({
           prompt_id: prompt.id,
           authoritative_workspace_path: args.workspace.path,
+          last_planning_input_source: 'initial_prompt',
         }),
       };
 
@@ -734,7 +859,7 @@ export class WorkflowRunService {
     sessionId: string;
     promptId: string;
     text: string;
-    source: 'initial_prompt' | 'user_message';
+    source: PlanningTurnSource;
     shouldResumeThread: boolean;
     messageMetadata?: Record<string, string>;
   }) {
@@ -776,7 +901,19 @@ export class WorkflowRunService {
         ...session,
         active_turn_id: turn.turnId,
         active_turn_started_at: this.#clock(),
+        activity_status: 'running',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         updated_at: this.#clock(),
+        metadata: {
+          ...session.metadata,
+          ...stringMetadata({
+            prompt_id: args.promptId,
+            last_planning_input_source: args.source,
+            last_planning_input_text: args.text,
+          }),
+        },
       };
       await this.#sessions.saveSession(updatedSession);
 
@@ -793,7 +930,9 @@ export class WorkflowRunService {
         summary:
           args.source === 'initial_prompt'
             ? 'Initial planning turn started.'
-            : 'Planning message turn started.',
+            : args.source === 'retry'
+              ? 'Planning retry turn started.'
+              : 'Planning message turn started.',
         state_id: run.current_state_id,
         session_id: updatedSession.id,
         thread_id: updatedSession.thread_id,
@@ -825,6 +964,7 @@ export class WorkflowRunService {
   async #steerPlanningTurn(args: {
     runId: string;
     session: AgentSessionRecord;
+    promptId: string;
     message: string;
   }): Promise<boolean> {
     if (!args.session.active_turn_id) {
@@ -848,14 +988,43 @@ export class WorkflowRunService {
         return true;
       }
 
+      const resumedFromStall = refreshedSession.activity_status === 'stalled';
+      const updatedSession: AgentSessionRecord = {
+        ...refreshedSession,
+        activity_status: 'running',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
+        updated_at: this.#clock(),
+        metadata: {
+          ...refreshedSession.metadata,
+          ...stringMetadata({
+            prompt_id: args.promptId,
+            last_planning_input_source: 'user_message',
+            last_planning_input_text: args.message,
+          }),
+        },
+      };
+      await this.#sessions.saveSession(updatedSession);
+      if (resumedFromStall && updatedSession.active_turn_id) {
+        this.#schedulePlanningTurnWatcher({
+          runId: run.id,
+          sessionId: updatedSession.id,
+          promptId: args.promptId,
+          turnId: updatedSession.active_turn_id,
+        });
+      }
+
       await this.#recordEvent({
         run,
         type: 'planner_turn_steered',
-        summary: 'Planning message appended to the active planner turn.',
+        summary: resumedFromStall
+          ? 'Planning message resumed the stalled planner turn.'
+          : 'Planning message appended to the active planner turn.',
         state_id: run.current_state_id,
-        session_id: refreshedSession.id,
-        thread_id: refreshedSession.thread_id,
-        turn_id: refreshedSession.active_turn_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: updatedSession.active_turn_id,
         metadata: stringMetadata({ message: args.message }),
       });
 
@@ -892,12 +1061,11 @@ export class WorkflowRunService {
 
     const task = this.#waitForPlanningTurnCompletion(args)
       .catch(async (error) => {
-        await this.#transitionRunToFailed({
+        await this.#handlePlanningTurnWatcherError({
           runId: args.runId,
           sessionId: args.sessionId,
+          promptId: args.promptId,
           turnId: args.turnId,
-          eventType: 'planner_turn_failed',
-          summary: 'Planner turn execution failed after starting.',
           error,
         });
       })
@@ -906,6 +1074,79 @@ export class WorkflowRunService {
       });
 
     this.#turnTasks.set(key, task);
+  }
+
+  async #handlePlanningTurnWatcherError(args: {
+    runId: string;
+    sessionId: string;
+    promptId: string;
+    turnId: string;
+    error: unknown;
+  }) {
+    if (this.#isTurnTimeoutError(args.error)) {
+      await this.#markPlanningTurnTimedOut(args);
+      return;
+    }
+
+    await this.#transitionRunToFailed({
+      runId: args.runId,
+      sessionId: args.sessionId,
+      turnId: args.turnId,
+      eventType: 'planner_turn_failed',
+      summary: 'Planner turn execution failed after starting.',
+      error: args.error,
+    });
+  }
+
+  async #markPlanningTurnTimedOut(args: {
+    runId: string;
+    sessionId: string;
+    promptId: string;
+    turnId: string;
+    error: unknown;
+  }) {
+    const run = await this.#runs.getRun(args.runId);
+    const session = await this.#sessions.getSession(args.sessionId);
+    if (!run || !session) {
+      return;
+    }
+
+    const errorMessage = args.error instanceof Error ? args.error.message : String(args.error);
+    const stalledAt = this.#clock();
+    const updatedSession: AgentSessionRecord = {
+      ...session,
+      activity_status: 'stalled',
+      stalled_at: stalledAt,
+      stall_reason: 'timeout',
+      last_error: errorMessage,
+      updated_at: stalledAt,
+      metadata: {
+        ...session.metadata,
+        ...stringMetadata({
+          prompt_id: args.promptId,
+          last_planning_input_source: session.metadata.last_planning_input_source ?? 'initial_prompt',
+        }),
+      },
+    };
+    await this.#sessions.saveSession(updatedSession);
+
+    if (run.current_state_id !== 'planning_conversation' || run.status !== 'active') {
+      return;
+    }
+
+    await this.#recordEvent({
+      run,
+      type: 'planner_turn_timed_out',
+      summary: 'Planner turn timed out and is recoverable.',
+      state_id: run.current_state_id,
+      session_id: updatedSession.id,
+      thread_id: updatedSession.thread_id,
+      turn_id: args.turnId,
+      metadata: stringMetadata({
+        prompt_id: args.promptId,
+        error: errorMessage,
+      }),
+    });
   }
 
   async #waitForPlanningTurnCompletion(args: {
@@ -917,6 +1158,7 @@ export class WorkflowRunService {
     const completion = await this.#codex.waitForTurnCompletion({
       threadId: (await this.#requireSession(args.sessionId)).thread_id,
       turnId: args.turnId,
+      timeoutMs: this.#takePlannerTurnTimeoutMs(),
     });
 
     const session = await this.#requireSession(args.sessionId);
@@ -929,6 +1171,10 @@ export class WorkflowRunService {
       latest_turn_id: args.turnId,
       latest_turn_completed_at: completedAt,
       last_turn_status: normalizeTurnStatus(completion.status),
+      activity_status: 'idle',
+      stalled_at: null,
+      stall_reason: null,
+      last_error: null,
       status: completion.status === 'completed' ? 'active' : 'failed',
       updated_at: completedAt,
     };
@@ -1329,6 +1575,10 @@ export class WorkflowRunService {
         latest_turn_id: null,
         latest_turn_completed_at: null,
         last_turn_status: null,
+        activity_status: 'idle',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         status: 'active',
         created_at: now,
         updated_at: now,
@@ -1367,6 +1617,10 @@ export class WorkflowRunService {
         ...session,
         active_turn_id: turn.turnId,
         active_turn_started_at: this.#clock(),
+        activity_status: 'running',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         updated_at: this.#clock(),
       };
       await this.#sessions.saveSession(updatedSession);
@@ -1452,6 +1706,10 @@ export class WorkflowRunService {
       latest_turn_id: args.turnId,
       latest_turn_completed_at: completedAt,
       last_turn_status: normalizeTurnStatus(completion.status),
+      activity_status: 'idle',
+      stalled_at: null,
+      stall_reason: null,
+      last_error: null,
       status: completion.status === 'completed' ? 'completed' : 'failed',
       updated_at: completedAt,
     };
@@ -1582,6 +1840,10 @@ export class WorkflowRunService {
       const preparedSession: AgentSessionRecord = {
         ...session,
         state_id: state.id,
+        activity_status: 'idle',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         status: 'active',
         workspace_id: args.implementerSession.workspace_id,
         cwd: args.implementerSession.cwd,
@@ -1618,6 +1880,10 @@ export class WorkflowRunService {
         ...preparedSession,
         active_turn_id: turn.turnId,
         active_turn_started_at: this.#clock(),
+        activity_status: 'running',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         updated_at: this.#clock(),
       };
       await this.#sessions.saveSession(updatedSession);
@@ -1710,6 +1976,10 @@ export class WorkflowRunService {
       latest_turn_id: args.turnId,
       latest_turn_completed_at: completedAt,
       last_turn_status: normalizeTurnStatus(completion.status),
+      activity_status: 'idle',
+      stalled_at: null,
+      stall_reason: null,
+      last_error: null,
       status: completion.status === 'completed' ? 'active' : 'failed',
       updated_at: completedAt,
     };
@@ -1956,6 +2226,10 @@ export class WorkflowRunService {
       const preparedSession: AgentSessionRecord = {
         ...session,
         state_id: args.run.current_state_id,
+        activity_status: 'idle',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         status: 'active',
         updated_at: this.#clock(),
         metadata: {
@@ -1987,6 +2261,10 @@ export class WorkflowRunService {
         ...preparedSession,
         active_turn_id: turn.turnId,
         active_turn_started_at: this.#clock(),
+        activity_status: 'running',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         updated_at: this.#clock(),
       };
       await this.#sessions.saveSession(updatedSession);
@@ -2035,6 +2313,10 @@ export class WorkflowRunService {
       state_id: args.run.current_state_id,
       active_turn_id: null,
       active_turn_started_at: null,
+      activity_status: 'idle',
+      stalled_at: null,
+      stall_reason: null,
+      last_error: null,
       status: 'active',
       updated_at: this.#clock(),
       metadata: {
@@ -2194,6 +2476,10 @@ export class WorkflowRunService {
         latest_turn_id: null,
         latest_turn_completed_at: null,
         last_turn_status: null,
+        activity_status: 'idle',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         status: 'active',
         created_at: now,
         updated_at: now,
@@ -2260,6 +2546,10 @@ export class WorkflowRunService {
         ...session,
         active_turn_id: turn.turnId,
         active_turn_started_at: this.#clock(),
+        activity_status: 'running',
+        stalled_at: null,
+        stall_reason: null,
+        last_error: null,
         updated_at: this.#clock(),
       };
       await this.#sessions.saveSession(updatedSession);
@@ -2380,6 +2670,10 @@ export class WorkflowRunService {
       latest_turn_id: args.turnId,
       latest_turn_completed_at: completedAt,
       last_turn_status: normalizeTurnStatus(completion.status),
+      activity_status: 'idle',
+      stalled_at: null,
+      stall_reason: null,
+      last_error: null,
       status: completion.status === 'completed' ? 'completed' : 'failed',
       updated_at: completedAt,
     };
@@ -2753,6 +3047,10 @@ export class WorkflowRunService {
           ...session,
           active_turn_id: null,
           active_turn_started_at: null,
+          activity_status: 'idle',
+          stalled_at: null,
+          stall_reason: null,
+          last_error: errorMessage,
           status: 'failed',
           updated_at: this.#clock(),
         });

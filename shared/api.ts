@@ -382,6 +382,10 @@ export type SendPlanningMessageResponse = {
   detail: WorkflowRunDetail;
 };
 
+export type RetryPlanningResponse = {
+  detail: WorkflowRunDetail;
+};
+
 export type AnswerWorkflowGateRequest = {
   option_id: string;
   message?: string;

@@ -19,7 +19,7 @@ import { WorkflowRunStore } from './workflowRunStore.ts';
 import { planImplementReviewWorkflow } from './workflows/planImplementReview.ts';
 
 type TurnPlan = {
-  completion?: 'immediate' | 'manual';
+  completion?: 'immediate' | 'manual' | 'timeout';
   assistantText?: string;
   status?: 'completed' | 'failed' | 'interrupted';
 };
@@ -28,6 +28,7 @@ type PendingTurn = {
   threadId: string;
   turnId: string;
   resolve: (value: { turnId: string; status: string }) => void;
+  timeout: NodeJS.Timeout | null;
 };
 
 class FakeCodexClient implements CodexClient {
@@ -35,6 +36,7 @@ class FakeCodexClient implements CodexClient {
   #threads = new Map<string, CodexThread>();
   #turnPlans: TurnPlan[];
   #pendingTurns = new Map<string, PendingTurn>();
+  #timeoutTurns = new Set<string>();
   #nextThread = 1;
   #nextTurn = 1;
   #failNextStartTurn: Error | null = null;
@@ -47,27 +49,39 @@ class FakeCodexClient implements CodexClient {
     this.#failNextStartTurn = error;
   }
 
-  completeTurn(turnId: string, args: { assistantText?: string; status?: 'completed' | 'failed' | 'interrupted' }) {
-    const pending = this.#pendingTurns.get(turnId);
-    if (!pending) {
-      throw new Error(`No pending turn "${turnId}" exists.`);
+  #findThreadForTurn(turnId: string) {
+    for (const [threadId, thread] of this.#threads.entries()) {
+      const turn = thread.turns.find((entry) => entry.id === turnId);
+      if (turn) {
+        return { threadId, thread, turn };
+      }
     }
 
-    const thread = this.#threads.get(pending.threadId);
-    const turn = thread?.turns.find((entry) => entry.id === turnId);
-    if (!thread || !turn) {
+    return null;
+  }
+
+  completeTurn(turnId: string, args: { assistantText?: string; status?: 'completed' | 'failed' | 'interrupted' }) {
+    const pending = this.#pendingTurns.get(turnId) ?? null;
+    const located = pending
+      ? {
+          threadId: pending.threadId,
+          thread: this.#threads.get(pending.threadId) ?? null,
+          turn: this.#threads.get(pending.threadId)?.turns.find((entry) => entry.id === turnId) ?? null,
+        }
+      : this.#findThreadForTurn(turnId);
+    if (!located?.thread || !located.turn) {
       throw new Error(`Thread data for pending turn "${turnId}" was not found.`);
     }
 
-    turn.status = args.status ?? 'completed';
-    turn.error =
-      turn.status === 'failed'
+    located.turn.status = args.status ?? 'completed';
+    located.turn.error =
+      located.turn.status === 'failed'
         ? {
             message: 'Synthetic failure',
           }
         : null;
     if (args.assistantText) {
-      turn.items.push({
+      located.turn.items.push({
         type: 'agentMessage',
         id: `${turnId}-assistant`,
         text: args.assistantText,
@@ -75,8 +89,13 @@ class FakeCodexClient implements CodexClient {
       });
     }
 
-    this.#pendingTurns.delete(turnId);
-    pending.resolve({ turnId, status: turn.status });
+    if (pending) {
+      this.#pendingTurns.delete(turnId);
+      if (pending.timeout) {
+        clearTimeout(pending.timeout);
+      }
+      pending.resolve({ turnId, status: located.turn.status });
+    }
   }
 
   async ensureStarted() {
@@ -145,7 +164,7 @@ class FakeCodexClient implements CodexClient {
     const completion = plan.completion ?? 'immediate';
     thread.turns.push({
       id: turnId,
-      status: completion === 'manual' ? 'inProgress' : plan.status ?? 'completed',
+      status: completion === 'manual' || completion === 'timeout' ? 'inProgress' : plan.status ?? 'completed',
       error: null,
       items: [
         {
@@ -170,6 +189,10 @@ class FakeCodexClient implements CodexClient {
       thread.preview = input.text;
     }
 
+    if (completion === 'timeout') {
+      this.#timeoutTurns.add(turnId);
+    }
+
     return { turnId };
   }
 
@@ -190,7 +213,7 @@ class FakeCodexClient implements CodexClient {
     return { turnId: input.turnId };
   }
 
-  async waitForTurnCompletion(input: { threadId: string; turnId: string }) {
+  async waitForTurnCompletion(input: { threadId: string; turnId: string; timeoutMs?: number }) {
     this.calls.push(`waitForTurnCompletion:${input.threadId}:${input.turnId}`);
     const thread = this.#threads.get(input.threadId);
     const turn = thread?.turns.find((entry) => entry.id === input.turnId);
@@ -205,11 +228,19 @@ class FakeCodexClient implements CodexClient {
       };
     }
 
-    return await new Promise<{ turnId: string; status: string }>((resolve) => {
+    return await new Promise<{ turnId: string; status: string }>((resolve, reject) => {
+      const timeout =
+        this.#timeoutTurns.delete(input.turnId) && input.timeoutMs != null
+          ? setTimeout(() => {
+              this.#pendingTurns.delete(input.turnId);
+              reject(new Error(`Timeout waiting for turn ${input.turnId} to complete.`));
+            }, input.timeoutMs)
+          : null;
       this.#pendingTurns.set(input.turnId, {
         threadId: input.threadId,
         turnId: input.turnId,
         resolve,
+        timeout,
       });
     });
   }
@@ -354,7 +385,13 @@ function createWorkspaceHarness(repoPath: string) {
   };
 }
 
-async function createHarness(turnPlans: TurnPlan[]) {
+async function createHarness(
+  turnPlans: TurnPlan[],
+  options?: {
+    plannerTurnTimeoutMs?: number;
+    plannerTurnTimeoutOnceMs?: number | null;
+  },
+) {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'inbox-workflow-run-test-'));
   const repoPath = path.join(rootDir, 'repo');
   await fs.mkdir(repoPath, { recursive: true });
@@ -377,6 +414,8 @@ async function createHarness(turnPlans: TurnPlan[]) {
     artifacts: new WorkflowArtifactStore(rootDir),
     workspaces,
     codex,
+    plannerTurnTimeoutMs: options?.plannerTurnTimeoutMs,
+    plannerTurnTimeoutOnceMs: options?.plannerTurnTimeoutOnceMs ?? null,
     clock: () => '2026-03-10T00:00:00.000Z',
     idGenerator: (() => {
       let nextId = 1;
@@ -690,6 +729,162 @@ test('planning-message returns before planner turn completion', async () => {
     assert.equal(detail.sessions[0]?.session.active_turn_id, 'turn_1');
     assert.deepEqual(harness.codex.calls, ['steerTurn:thr_1:turn_1', 'readThread:thr_1']);
     assert.equal(detail.events.at(-1)?.type, 'planner_turn_steered');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('planner timeout leaves the run recoverable in planning_conversation', async () => {
+  const harness = await createHarness([{ completion: 'timeout' }], { plannerTurnTimeoutMs: 5 });
+
+  try {
+    const created = await harness.service.createRun({
+      workflow_id: 'plan-implement-review',
+      repo_path: harness.repoPath,
+      goal_prompt: 'Build the workflow runtime.',
+    });
+
+    const detail = await waitForRunDetail(harness.service, created.run.id, (nextDetail) => {
+      const plannerSession = nextDetail.sessions.find((session) => session.session.kind === 'planning_conversation');
+      return (
+        nextDetail.run.current_state_id === 'planning_conversation' &&
+        nextDetail.run.status === 'active' &&
+        plannerSession?.session.activity_status === 'stalled' &&
+        plannerSession.session.stall_reason === 'timeout' &&
+        nextDetail.events.some((event) => event.type === 'planner_turn_timed_out')
+      );
+    });
+    const plannerSession = detail.sessions.find((session) => session.session.kind === 'planning_conversation');
+
+    assert.equal(detail.run.status, 'active');
+    assert.equal(detail.run.current_state_id, 'planning_conversation');
+    assert.equal(plannerSession?.session.status, 'active');
+    assert.equal(plannerSession?.session.activity_status, 'stalled');
+    assert.equal(plannerSession?.session.stall_reason, 'timeout');
+    assert.equal(plannerSession?.session.active_turn_id, 'turn_1');
+    assert.equal(detail.events.some((event) => event.type === 'planner_turn_timed_out'), true);
+    assert.equal(
+      detail.events.some(
+        (event) => event.type === 'state_transition' && event.to_state_id === 'failed',
+      ),
+      false,
+    );
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('sending another planning message after timeout still works', async () => {
+  const harness = await createHarness([{ completion: 'timeout' }], { plannerTurnTimeoutMs: 5 });
+
+  try {
+    const created = await harness.service.createRun({
+      workflow_id: 'plan-implement-review',
+      repo_path: harness.repoPath,
+      goal_prompt: 'Build the workflow runtime.',
+    });
+
+    await waitForRunDetail(harness.service, created.run.id, (nextDetail) =>
+      nextDetail.events.some((event) => event.type === 'planner_turn_timed_out'),
+    );
+
+    const markerMissingUpdate = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'planner_marker_not_found',
+    );
+    const detail = await harness.service.sendPlanningMessage({
+      runId: created.run.id,
+      message: 'Continue planning and keep the first step very narrow.',
+    });
+
+    const plannerSession = detail.sessions.find((session) => session.session.kind === 'planning_conversation');
+    assert.equal(detail.run.current_state_id, 'planning_conversation');
+    assert.equal(plannerSession?.session.thread_id, 'thr_1');
+    assert.equal(plannerSession?.session.active_turn_id, 'turn_1');
+    assert.equal(plannerSession?.session.activity_status, 'running');
+    assert.equal(detail.events.at(-1)?.type, 'planner_turn_steered');
+
+    harness.codex.completeTurn('turn_1', {
+      assistantText: 'Still planning. I need one more clarification before I emit the first prompt candidate.',
+    });
+    await markerMissingUpdate;
+
+    const completedDetail = await waitForNoActiveTurn(harness.service, created.run.id);
+    const completedPlannerSession = completedDetail.sessions.find(
+      (session) => session.session.kind === 'planning_conversation',
+    );
+    assert.equal(completedDetail.run.current_state_id, 'planning_conversation');
+    assert.equal(completedPlannerSession?.session.activity_status, 'idle');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('retry action restarts planning honestly after timeout', async () => {
+  const harness = await createHarness([{ completion: 'timeout' }], { plannerTurnTimeoutMs: 5 });
+
+  try {
+    const created = await harness.service.createRun({
+      workflow_id: 'plan-implement-review',
+      repo_path: harness.repoPath,
+      goal_prompt: 'Build the workflow runtime.',
+    });
+
+    await waitForRunDetail(harness.service, created.run.id, (nextDetail) =>
+      nextDetail.events.some((event) => event.type === 'planner_turn_timed_out'),
+    );
+
+    harness.codex.calls = [];
+    const detail = await harness.service.retryPlanning({ runId: created.run.id });
+    const plannerSession = detail.sessions.find((session) => session.session.kind === 'planning_conversation');
+
+    assert.equal(detail.run.current_state_id, 'planning_conversation');
+    assert.equal(plannerSession?.session.thread_id, 'thr_1');
+    assert.equal(plannerSession?.session.active_turn_id, 'turn_1');
+    assert.equal(plannerSession?.session.activity_status, 'running');
+    assert.equal(detail.events.some((event) => event.type === 'planner_turn_retried'), true);
+    assert.deepEqual(harness.codex.calls.slice(0, 2), ['steerTurn:thr_1:turn_1', 'waitForTurnCompletion:thr_1:turn_1']);
+
+    harness.codex.completeTurn('turn_1', {
+      assistantText: 'Retry completed without a prompt candidate yet.',
+    });
+    await waitForNoActiveTurn(harness.service, created.run.id);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('successful planner output after retry still opens the first prompt gate', async () => {
+  const harness = await createHarness([{ completion: 'timeout' }], { plannerTurnTimeoutMs: 5 });
+
+  try {
+    const created = await harness.service.createRun({
+      workflow_id: 'plan-implement-review',
+      repo_path: harness.repoPath,
+      goal_prompt: 'Build the workflow runtime.',
+    });
+
+    await waitForRunDetail(harness.service, created.run.id, (nextDetail) =>
+      nextDetail.events.some((event) => event.type === 'planner_turn_timed_out'),
+    );
+
+    await harness.service.retryPlanning({ runId: created.run.id });
+    const gateOpened = waitForUpdate(
+      harness.service,
+      (update) =>
+        update.run_id === created.run.id &&
+        update.event.type === 'gate_opened' &&
+        update.event.metadata.definition_gate_id === 'first_prompt_gate',
+    );
+    harness.codex.completeTurn('turn_1', {
+      assistantText:
+        '<first_prompt_candidate>Implement asynchronous workflow-run SSE updates.</first_prompt_candidate>',
+    });
+    await gateOpened;
+
+    const detail = await waitForNoActiveTurn(harness.service, created.run.id);
+    assert.equal(detail.run.current_state_id, 'first_prompt_approval');
+    assert.equal(detail.open_gates[0]?.definition_gate_id, 'first_prompt_gate');
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }

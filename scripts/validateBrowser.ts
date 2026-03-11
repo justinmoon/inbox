@@ -946,6 +946,100 @@ async function sendWorkflowPlanningMessageFromBrowser(message: string) {
   return readEvalString(output);
 }
 
+async function waitForWorkflowPlanningStallSurface(runId: string) {
+  await waitForWorkflowRunDetail(
+    runId,
+    (detail) =>
+      detail.run?.current_state_id === 'planning_conversation' &&
+      detail.run?.status === 'active' &&
+      Array.isArray(detail.sessions) &&
+      detail.sessions.some(
+        (sessionDetail: Record<string, any>) =>
+          sessionDetail.session?.kind === 'planning_conversation' &&
+          sessionDetail.session?.activity_status === 'stalled' &&
+          sessionDetail.session?.stall_reason === 'timeout',
+      ) &&
+      Array.isArray(detail.events) &&
+      detail.events.some((event: Record<string, any>) => event.type === 'planner_turn_timed_out'),
+    'enter a recoverable stalled planning state',
+  );
+
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 30000;',
+      '  while (Date.now() < deadline) {',
+      "    const surface = document.querySelector('[data-workflow-primary-surface=\"planning_conversation\"]');",
+      "    const plannerStatus = surface?.getAttribute('data-workflow-planner-status');",
+      "    const stall = document.querySelector('[data-workflow-planning-stalled=\"true\"]');",
+      "    const retry = document.querySelector('[data-workflow-planning-retry=\"true\"]');",
+      "    const activeAgent = document.querySelector('[data-workflow-active-agent]')?.getAttribute('data-workflow-active-agent');",
+      "    const workspace = document.querySelector('[data-workflow-active-workspace]')?.getAttribute('data-workflow-active-workspace') ?? '';",
+      "    const progress = document.querySelector('[data-workflow-progress-status]')?.getAttribute('data-workflow-progress-status');",
+      "    const lastEventType = document.querySelector('[data-workflow-last-event-type]')?.getAttribute('data-workflow-last-event-type');",
+      "    if (surface && plannerStatus === 'stalled' && stall && retry && activeAgent === 'Planner' && workspace.includes('/workspaces/') && progress === 'stalled' && lastEventType === 'planner_turn_timed_out') {",
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      '  }',
+      "  throw new Error('Workflow route did not surface the recoverable planner timeout honestly.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function retryWorkflowPlanningFromBrowser() {
+  await browserEval(
+    [
+      '(async () => {',
+      "  const button = document.querySelector('[data-workflow-planning-retry=\"true\"]');",
+      "  if (!(button instanceof HTMLButtonElement)) throw new Error('Planning retry button is missing.');",
+      '  button.click();',
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function waitForWorkflowPlanningRecovery(runId: string) {
+  await waitForWorkflowRunDetail(
+    runId,
+    (detail) =>
+      detail.run?.current_state_id === 'planning_conversation' &&
+      Array.isArray(detail.sessions) &&
+      detail.sessions.some(
+        (sessionDetail: Record<string, any>) =>
+          sessionDetail.session?.kind === 'planning_conversation' &&
+          sessionDetail.session?.activity_status === 'running',
+      ) &&
+      Array.isArray(detail.events) &&
+      detail.events.some(
+        (event: Record<string, any>) =>
+          event.type === 'planner_turn_retried' ||
+          (event.type === 'planner_turn_started' && typeof event.summary === 'string' && event.summary.includes('retry')),
+      ),
+    'resume planning after retry',
+  );
+
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 30000;',
+      '  while (Date.now() < deadline) {',
+      "    const surface = document.querySelector('[data-workflow-primary-surface=\"planning_conversation\"]');",
+      "    const plannerStatus = surface?.getAttribute('data-workflow-planner-status');",
+      "    const progress = document.querySelector('[data-workflow-progress-status]')?.getAttribute('data-workflow-progress-status');",
+      "    const lastEventType = document.querySelector('[data-workflow-last-event-type]')?.getAttribute('data-workflow-last-event-type');",
+      "    if (surface && plannerStatus === 'running' && progress === 'making_progress' && (lastEventType === 'planner_turn_retried' || lastEventType === 'planner_turn_started' || lastEventType === 'planner_turn_steered')) {",
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      '  }',
+      "  throw new Error('Workflow route did not reflect planning recovery after retry.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
 async function waitForWorkflowApprovalSurface(runId: string) {
   await waitForWorkflowRunDetail(
     runId,
@@ -1128,6 +1222,10 @@ async function assertWorkflowRuntimeRoute(repoPath: string) {
     ].join(' '),
   );
 
+  await waitForWorkflowPlanningStallSurface(runId);
+  await retryWorkflowPlanningFromBrowser();
+  await waitForWorkflowPlanningRecovery(runId);
+
   await sendWorkflowPlanningMessageFromBrowser(
     [
       'Do not inspect files or run commands for this planning step.',
@@ -1243,6 +1341,7 @@ const server = spawn('npm', ['run', 'start'], {
     PORT: port,
     INBOX_IMPORTED_ROOT: importedRoot,
     INBOX_RUNTIME_ROOT: runtimeRoot,
+    INBOX_WORKFLOW_PLANNER_TIMEOUT_ONCE_MS: '1',
   },
   stdio: 'inherit',
 });

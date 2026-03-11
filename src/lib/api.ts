@@ -3,6 +3,7 @@ import type {
   ChangeUnitListResponse,
   CreateWorkflowRunRequest,
   ReadWorkflowDefinitionResponse,
+  RetryPlanningResponse,
   WorkflowRunDetail,
   WorkflowRunStreamEvent,
   ExecuteNextActionResult,
@@ -127,6 +128,16 @@ export async function sendWorkflowPlanningMessage(
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ message }),
+    },
+  );
+  return response.detail;
+}
+
+export async function retryWorkflowPlanning(runId: string): Promise<WorkflowRunDetail> {
+  const response = await requestJson<RetryPlanningResponse>(
+    `/api/workflow-runs/${encodeURIComponent(runId)}/planning-retry`,
+    {
+      method: 'POST',
     },
   );
   return response.detail;

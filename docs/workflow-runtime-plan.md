@@ -966,6 +966,50 @@ The runtime now also records a small workspace-contract baseline for implementer
 
 If the source repo becomes dirty while the run was supposed to execute inside a peer workspace, the run now fails loudly with `workspace_contract_violated` instead of continuing into review or artifact generation.
 
+## Recoverable Planner Timeout
+
+Planner turn timeout during `planning_conversation` is now modeled as a recoverable stall, not an automatic terminal run failure.
+
+The runtime now persists lightweight planner activity truth on the planning session:
+
+- `activity_status`
+  - `idle`
+  - `running`
+  - `stalled`
+- `stalled_at`
+- `stall_reason`
+- `last_error`
+
+When the planner wait hits a timeout:
+
+- the run stays in `planning_conversation`
+- the run stays `active`
+- the planning session moves to:
+  - `activity_status = stalled`
+  - `stall_reason = timeout`
+- the runtime records `planner_turn_timed_out`
+
+Recovery is intentionally narrow:
+
+- the user can send another planning message into the same run
+- the user can trigger an explicit planning retry action
+- retry attempts to resume the same planner thread / turn first
+- if that is no longer possible, runtime starts a fresh planning turn on the same planner thread
+
+The workflow route now surfaces stalled planning explicitly instead of making it look like healthy background work:
+
+- planner stalled banner
+- retry action
+- current active agent
+- authoritative workspace path
+- last successful milestone / last runtime event
+
+Broader reliability work is still missing:
+
+- restart recovery for in-flight planner turns
+- automatic detection of a turn that completed after the runtime already marked it stalled
+- richer backoff / health policies beyond this one recoverable timeout path
+
 ## Remaining Gaps Before Later Loops And Landing Flows
 
 Still intentionally missing:

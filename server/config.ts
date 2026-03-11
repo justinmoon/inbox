@@ -11,7 +11,23 @@ export type ServerConfig = {
   approvalPolicy: 'on-request' | 'on-failure' | 'never' | 'untrusted';
   sandboxMode: 'workspaceWrite' | 'readOnly' | 'dangerFullAccess';
   networkAccess: boolean;
+  workflowPlannerTimeoutMs: number;
+  workflowPlannerTimeoutOnceMs: number | null;
 };
+
+function readIntegerEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function readNullableIntegerEnv(value: string | undefined): number | null {
+  if (value == null || value === '') {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
 
 export function readConfig(env: NodeJS.ProcessEnv): ServerConfig {
   return {
@@ -25,5 +41,7 @@ export function readConfig(env: NodeJS.ProcessEnv): ServerConfig {
     approvalPolicy: (env.INBOX_CODEX_APPROVAL_POLICY ?? 'never') as ServerConfig['approvalPolicy'],
     sandboxMode: (env.INBOX_CODEX_SANDBOX_MODE ?? 'workspaceWrite') as ServerConfig['sandboxMode'],
     networkAccess: (env.INBOX_CODEX_NETWORK_ACCESS ?? 'true') === 'true',
+    workflowPlannerTimeoutMs: readIntegerEnv(env.INBOX_WORKFLOW_PLANNER_TIMEOUT_MS, 300_000),
+    workflowPlannerTimeoutOnceMs: readNullableIntegerEnv(env.INBOX_WORKFLOW_PLANNER_TIMEOUT_ONCE_MS),
   };
 }

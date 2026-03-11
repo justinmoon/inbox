@@ -19,6 +19,7 @@ import {
   fetchWorkflowRuns,
   openWorkflowRunEvents,
   parseWorkflowRunStreamEvent,
+  retryWorkflowPlanning,
   sendWorkflowPlanningMessage,
 } from '../lib/api.ts';
 import { formatLongTimestamp, formatTimestamp } from '../lib/format.ts';
@@ -88,6 +89,21 @@ function findActiveSession(detail: WorkflowRunDetail | null) {
   return detail?.sessions.find((entry) => entry.session.active_turn_id) ?? null;
 }
 
+function findStalledSession(detail: WorkflowRunDetail | null) {
+  return detail?.sessions.find((entry) => entry.session.activity_status === 'stalled') ?? null;
+}
+
+function findLastSuccessfulRuntimeEvent(detail: WorkflowRunDetail | null) {
+  return (
+    detail?.events.findLast(
+      (event) =>
+        !event.type.endsWith('_timed_out') &&
+        !event.type.endsWith('_failed') &&
+        event.type !== 'planner_runtime_failed',
+    ) ?? null
+  );
+}
+
 function currentWorkspacePath(detail: WorkflowRunDetail | null) {
   const activeSession = findActiveSession(detail);
   if (activeSession?.session.cwd) {
@@ -119,10 +135,20 @@ function currentActiveAgentLabel(
 
   const activeSession = findActiveSession(detail);
   if (activeSession) {
+    const matchedAgent =
+      swarmView?.agents.find(
+        (agent) =>
+          agent.session_id === activeSession.session.id || agent.thread_id === activeSession.session.thread_id,
+      ) ?? null;
+    if (matchedAgent) {
+      return matchedAgent.title;
+    }
+
     return humanizeToken(activeSession.session.actor);
   }
 
-  const swarmAgent = swarmView?.agents.find((agent) => agent.status === 'working') ?? null;
+  const swarmAgent =
+    swarmView?.agents.find((agent) => agent.status === 'working' || agent.status === 'stalled') ?? null;
   if (swarmAgent) {
     return swarmAgent.title;
   }
@@ -144,6 +170,9 @@ function currentProgressState(detail: WorkflowRunDetail | null, openGate: GateRe
   if (openGate) {
     return 'waiting_on_user';
   }
+  if (findStalledSession(detail)) {
+    return 'stalled';
+  }
   if (findActiveSession(detail)) {
     return 'making_progress';
   }
@@ -152,6 +181,12 @@ function currentProgressState(detail: WorkflowRunDetail | null, openGate: GateRe
 
 function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetail }) {
   const { session, thread, load_error } = sessionDetail;
+  const activityPillClass =
+    session.activity_status === 'stalled'
+      ? 'workflow-state-pill-amber'
+      : session.activity_status === 'running'
+        ? 'workflow-state-pill-blue'
+        : 'workflow-state-pill-slate';
 
   return (
     <article
@@ -159,6 +194,7 @@ function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetai
       data-workflow-session-kind={session.kind}
       data-workflow-session-actor={session.actor}
       data-workflow-session-status={session.status}
+      data-workflow-session-activity-status={session.activity_status}
       data-workflow-session-thread-id={session.thread_id}
     >
       <header className="workflow-session-card-header">
@@ -168,9 +204,9 @@ function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetai
         </div>
         <div className="workflow-session-pills">
           <span className="workflow-state-pill workflow-state-pill-slate">{session.status}</span>
-          {session.active_turn_id ? (
-            <span className="workflow-state-pill workflow-state-pill-blue">Turn active</span>
-          ) : null}
+          <span className={`workflow-state-pill ${activityPillClass}`}>
+            {humanizeToken(session.activity_status)}
+          </span>
         </div>
       </header>
 
@@ -236,6 +272,7 @@ function swarmStatePillClass(value: 'working' | 'needs_user_input' | 'failed' | 
 function swarmAgentStatePillClass(value: SwarmRunAgentView['status']) {
   switch (value) {
     case 'waiting_on_user':
+    case 'stalled':
       return 'workflow-state-pill-amber';
     case 'failed':
       return 'workflow-state-pill-red';
@@ -336,6 +373,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [creatingRun, setCreatingRun] = useState(false);
   const [sendingPlanningMessage, setSendingPlanningMessage] = useState(false);
+  const [retryingPlanning, setRetryingPlanning] = useState(false);
   const [answeringGate, setAnsweringGate] = useState(false);
   const [planningMessage, setPlanningMessage] = useState('');
   const [revisionMessage, setRevisionMessage] = useState('');
@@ -361,6 +399,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   );
   const activeWorkspacePath = useMemo(() => currentWorkspacePath(detail), [detail]);
   const lastEvent = detail?.events.at(-1) ?? null;
+  const lastSuccessfulRuntimeEvent = useMemo(() => findLastSuccessfulRuntimeEvent(detail), [detail]);
   const progressState = useMemo(() => currentProgressState(detail, openApprovalGate), [detail, openApprovalGate]);
   const workflowTitle = detail
     ? swarmView?.definition.title ?? getWorkflowTitle(definitions, detail.run.workflow_id)
@@ -587,6 +626,22 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
     }
   }
 
+  async function handlePlanningRetry() {
+    if (!detail) return;
+
+    setRetryingPlanning(true);
+    setActionError(null);
+    try {
+      const nextDetail = await retryWorkflowPlanning(detail.run.id);
+      setDetail(nextDetail);
+      await refreshRuns();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to retry the planning turn.');
+    } finally {
+      setRetryingPlanning(false);
+    }
+  }
+
   async function handleGateAction(optionId: string) {
     if (!detail || !openApprovalGate) return;
 
@@ -626,10 +681,22 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
     }
 
     if (detail.run.current_state_family === 'conversation') {
+      const plannerIsStalled = plannerSession?.session.activity_status === 'stalled';
+      const plannerStatusLabel = plannerIsStalled
+        ? 'Planner stalled'
+        : plannerSession?.session.active_turn_id
+          ? 'Planner thinking'
+          : 'Planner ready';
+      const plannerStatusPillClass = plannerIsStalled
+        ? 'workflow-state-pill-amber'
+        : plannerSession?.session.active_turn_id
+          ? 'workflow-state-pill-blue'
+          : 'workflow-state-pill-slate';
       return (
         <section
           className="workflow-panel workflow-primary-panel"
           data-workflow-primary-surface="planning_conversation"
+          data-workflow-planner-status={plannerSession?.session.activity_status ?? 'idle'}
         >
           <header className="workflow-panel-header">
             <div>
@@ -637,8 +704,8 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               <h2>{workflowTitle}</h2>
             </div>
             <div className="workflow-session-pills">
-              <span className="workflow-state-pill workflow-state-pill-blue">
-                {plannerSession?.session.active_turn_id ? 'Planner thinking' : 'Planner ready'}
+              <span className={`workflow-state-pill ${plannerStatusPillClass}`}>
+                {plannerStatusLabel}
               </span>
               <span className="workflow-state-pill workflow-state-pill-slate">
                 {liveUpdates.mode === 'events' ? 'Live updates' : liveUpdates.mode === 'polling' ? 'Polling' : 'Idle'}
@@ -649,6 +716,48 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
           <p className="workflow-muted-copy">
             Stay in planning until the planner emits the explicit first-prompt marker.
           </p>
+
+          {plannerIsStalled ? (
+            <article className="workflow-goal-card" data-workflow-planning-stalled="true">
+              <p className="workflow-card-kicker">Planner Timed Out</p>
+              <p>
+                The latest planning turn timed out. The run is still recoverable and stays in the same planning conversation.
+              </p>
+              <dl className="workflow-meta-grid">
+                <div>
+                  <dt>Current agent</dt>
+                  <dd>{activeAgentLabel}</dd>
+                </div>
+                <div>
+                  <dt>Workspace</dt>
+                  <dd data-workflow-planning-workspace={activeWorkspacePath ?? ''}>
+                    <code>{activeWorkspacePath ?? 'unavailable'}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Last milestone</dt>
+                  <dd data-workflow-planning-last-milestone={lastSuccessfulRuntimeEvent?.type ?? ''}>
+                    {lastSuccessfulRuntimeEvent?.summary ?? 'No successful planner milestone yet.'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Last error</dt>
+                  <dd>{plannerSession?.session.last_error ?? 'Timeout while waiting for the planner turn.'}</dd>
+                </div>
+              </dl>
+              <div className="workflow-action-row">
+                <button
+                  className="solid-button"
+                  data-workflow-planning-retry="true"
+                  disabled={retryingPlanning || sendingPlanningMessage}
+                  onClick={() => void handlePlanningRetry()}
+                  type="button"
+                >
+                  {retryingPlanning ? 'Retrying…' : 'Retry planner turn'}
+                </button>
+              </div>
+            </article>
+          ) : null}
 
           {plannerSession?.thread ? <CodexThreadViewer thread={plannerSession.thread} /> : null}
 
@@ -671,7 +780,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               <button
                 className="solid-button"
                 data-workflow-planning-send="true"
-                disabled={sendingPlanningMessage || !planningMessage.trim()}
+                disabled={sendingPlanningMessage || retryingPlanning || !planningMessage.trim()}
                 type="submit"
               >
                 {sendingPlanningMessage ? 'Sending…' : 'Send planning message'}
