@@ -461,6 +461,23 @@ async function waitForSessionsToBecomeIdle(
   throw new Error(`Timed out waiting for sessions ${sessionKinds.join(', ')} to become idle.`);
 }
 
+async function waitForRunDetail(
+  service: WorkflowRunService,
+  runId: string,
+  predicate: (detail: NonNullable<Awaited<ReturnType<WorkflowRunService['readRunDetail']>>>) => boolean,
+) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const detail = await service.readRunDetail(runId);
+    if (detail && predicate(detail)) {
+      return detail;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  throw new Error(`Timed out waiting for workflow run "${runId}" to reach the expected detail shape.`);
+}
+
 async function moveRunToFirstPromptApproval(
   harness: Awaited<ReturnType<typeof createHarness>>,
   promptCandidate = 'Implement the runtime persistence and initial planner run path.',
@@ -544,12 +561,12 @@ async function moveRunToArtifactForking(harness: Awaited<ReturnType<typeof creat
 async function moveRunToStepApproval(harness: Awaited<ReturnType<typeof createHarness>>) {
   const { created } = await moveRunToArtifactForking(harness);
 
-  const stepApprovalOpened = waitForUpdate(
+  const stepApprovalGateOpened = waitForUpdate(
     harness.service,
     (update) =>
       update.run_id === created.run.id &&
-      update.event.type === 'state_transition' &&
-      update.event.to_state_id === 'step_approval',
+      update.event.type === 'gate_opened' &&
+      update.event.metadata.definition_gate_id === 'step_approval_gate',
   );
   harness.codex.completeTurn('turn_4', {
     assistantText: '<tutorial>Explain the completed runtime step and why it matters.</tutorial>',
@@ -557,13 +574,23 @@ async function moveRunToStepApproval(harness: Awaited<ReturnType<typeof createHa
   harness.codex.completeTurn('turn_5', {
     assistantText: '<next_prompt>Implement the next bounded runtime step.</next_prompt>',
   });
-  await stepApprovalOpened;
+  await stepApprovalGateOpened;
   await harness.service.waitForIdle();
 
-  const detail = await waitForSessionsToBecomeIdle(harness.service, created.run.id, [
-    'tutorial_writing',
-    'next_prompt_writing',
-  ]);
+  const detail = await waitForRunDetail(harness.service, created.run.id, (nextDetail) => {
+    const tutorialSession = nextDetail.sessions.find((entry) => entry.session.kind === 'tutorial_writing');
+    const nextPromptSession = nextDetail.sessions.find((entry) => entry.session.kind === 'next_prompt_writing');
+    return (
+      tutorialSession?.session.active_turn_id === null &&
+      tutorialSession?.session.latest_turn_id != null &&
+      nextPromptSession?.session.active_turn_id === null &&
+      nextPromptSession?.session.latest_turn_id != null &&
+      nextDetail.events.some(
+        (event) =>
+          event.type === 'gate_opened' && event.metadata.definition_gate_id === 'step_approval_gate',
+      )
+    );
+  });
   assert.ok(detail, 'expected run detail after step approval gate opens');
   const gate = detail.open_gates[0];
   assert.ok(gate, 'expected the step approval gate to be open');
@@ -1369,12 +1396,12 @@ test('swarm timeline reflects the artifact worker lifecycle honestly', async () 
   try {
     const { created } = await moveRunToArtifactForking(harness);
 
-    const stepApprovalOpened = waitForUpdate(
+    const stepApprovalGateOpened = waitForUpdate(
       harness.service,
       (update) =>
         update.run_id === created.run.id &&
-        update.event.type === 'state_transition' &&
-        update.event.to_state_id === 'step_approval',
+        update.event.type === 'gate_opened' &&
+        update.event.metadata.definition_gate_id === 'step_approval_gate',
     );
     harness.codex.completeTurn('turn_4', {
       assistantText: '<tutorial>Explain the completed runtime step and why it matters.</tutorial>',
@@ -1382,14 +1409,23 @@ test('swarm timeline reflects the artifact worker lifecycle honestly', async () 
     harness.codex.completeTurn('turn_5', {
       assistantText: '<next_prompt>Implement the next bounded runtime step.</next_prompt>',
     });
-    await stepApprovalOpened;
+    await stepApprovalGateOpened;
 
-    const detail = await waitForSessionsToBecomeIdle(harness.service, created.run.id, [
-      'tutorial_writing',
-      'next_prompt_writing',
-    ]);
+    const detail = await waitForRunDetail(harness.service, created.run.id, (nextDetail) => {
+      const tutorialSession = nextDetail.sessions.find((entry) => entry.session.kind === 'tutorial_writing');
+      const nextPromptSession = nextDetail.sessions.find((entry) => entry.session.kind === 'next_prompt_writing');
+      return (
+        tutorialSession?.session.active_turn_id === null &&
+        tutorialSession?.session.latest_turn_id != null &&
+        nextPromptSession?.session.active_turn_id === null &&
+        nextPromptSession?.session.latest_turn_id != null &&
+        nextDetail.events.some(
+          (event) =>
+            event.type === 'gate_opened' && event.metadata.definition_gate_id === 'step_approval_gate',
+        )
+      );
+    });
     await harness.service.waitForIdle();
-    const timelineTitles = detail?.swarm?.timeline.map((entry) => entry.title) ?? [];
     const artifactPhaseEvents =
       detail?.events.filter(
         (event) =>
@@ -1408,26 +1444,28 @@ test('swarm timeline reflects the artifact worker lifecycle honestly', async () 
       detail?.swarm?.timeline.filter((entry) =>
         artifactPhaseEvents.some((event) => event.id === entry.event_id),
       ) ?? [];
+    const artifactTimelineTitles = artifactTimeline.map((entry) => entry.title);
 
-    assert.equal(timelineTitles.includes('Tutorial worker session started'), true);
-    assert.equal(timelineTitles.includes('Tutorial worker turn started'), true);
-    assert.equal(timelineTitles.includes('Tutorial artifact persisted'), true);
-    assert.equal(timelineTitles.includes('Next prompt worker session started'), true);
-    assert.equal(timelineTitles.includes('Next prompt worker turn started'), true);
-    assert.equal(timelineTitles.includes('Next prompt artifact persisted'), true);
-    assert.equal(timelineTitles.includes('Gate opened'), true);
+    assert.equal(artifactTimelineTitles.includes('Tutorial worker session started'), true);
+    assert.equal(artifactTimelineTitles.includes('Tutorial worker turn started'), true);
+    assert.equal(artifactTimelineTitles.includes('Tutorial artifact persisted'), true);
+    assert.equal(artifactTimelineTitles.includes('Next prompt worker session started'), true);
+    assert.equal(artifactTimelineTitles.includes('Next prompt worker turn started'), true);
+    assert.equal(artifactTimelineTitles.includes('Next prompt artifact persisted'), true);
+    assert.equal(artifactTimelineTitles.includes('Gate opened'), true);
     assert.equal(
-      timelineTitles.indexOf('Tutorial worker session started') <
-        timelineTitles.indexOf('Tutorial artifact persisted'),
+      artifactTimelineTitles.indexOf('Tutorial worker session started') <
+        artifactTimelineTitles.indexOf('Tutorial artifact persisted'),
       true,
     );
     assert.equal(
-      timelineTitles.indexOf('Next prompt worker session started') <
-        timelineTitles.indexOf('Next prompt artifact persisted'),
+      artifactTimelineTitles.indexOf('Next prompt worker session started') <
+        artifactTimelineTitles.indexOf('Next prompt artifact persisted'),
       true,
     );
     assert.equal(
-      timelineTitles.indexOf('Next prompt artifact persisted') < timelineTitles.lastIndexOf('Gate opened'),
+      artifactTimelineTitles.indexOf('Next prompt artifact persisted') <
+        artifactTimelineTitles.lastIndexOf('Gate opened'),
       true,
     );
     assert.deepEqual(
@@ -1438,6 +1476,19 @@ test('swarm timeline reflects the artifact worker lifecycle honestly', async () 
     assert.deepEqual(
       artifactTimeline.map((entry) => entry.event_sequence),
       artifactPhaseEvents.map((event) => event.sequence),
+    );
+    assert.equal(
+      artifactPhaseEvents.filter(
+        (event) => event.type === 'state_transition' && event.to_state_id === 'step_approval',
+      ).length,
+      1,
+    );
+    assert.equal(
+      artifactPhaseEvents.filter(
+        (event) =>
+          event.type === 'gate_opened' && event.metadata.definition_gate_id === 'step_approval_gate',
+      ).length,
+      1,
     );
     assert.equal(artifactTimeline.at(-1)?.title, 'Gate opened');
   } finally {

@@ -178,6 +178,7 @@ export class WorkflowRunService {
   #idGenerator: IdGenerator;
   #codexExecution: CodexExecutionOptions;
   #turnTasks = new Map<string, Promise<void>>();
+  #runMutationQueues = new Map<string, Promise<void>>();
   #listeners = new Set<WorkflowRunUpdateListener>();
 
   constructor(args: {
@@ -222,6 +223,29 @@ export class WorkflowRunService {
   async waitForIdle() {
     while (this.#turnTasks.size > 0) {
       await Promise.allSettled([...this.#turnTasks.values()]);
+    }
+  }
+
+  async #withRunMutationLock<T>(runId: string, operation: () => Promise<T>) {
+    const previous = this.#runMutationQueues.get(runId) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(
+      () => next,
+      () => next,
+    );
+    this.#runMutationQueues.set(runId, queued);
+    await previous;
+
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#runMutationQueues.get(runId) === queued) {
+        this.#runMutationQueues.delete(runId);
+      }
     }
   }
 
@@ -2534,61 +2558,63 @@ export class WorkflowRunService {
   }
 
   async #maybeAdvanceArtifactForking(runId: string) {
-    const run = await this.#requireRun(runId);
-    if (run.current_state_id !== 'artifact_forking' || run.status !== 'active') {
-      return;
-    }
+    await this.#withRunMutationLock(runId, async () => {
+      const run = await this.#requireRun(runId);
+      if (run.current_state_id !== 'artifact_forking' || run.status !== 'active') {
+        return;
+      }
 
-    const tutorialArtifact = await this.#loadLatestArtifact(runId, 'tutorial_artifact');
-    const nextPromptArtifact = await this.#loadLatestArtifact(runId, 'next_prompt_artifact');
-    if (!tutorialArtifact || !nextPromptArtifact) {
-      return;
-    }
+      const tutorialArtifact = await this.#loadLatestArtifact(runId, 'tutorial_artifact');
+      const nextPromptArtifact = await this.#loadLatestArtifact(runId, 'next_prompt_artifact');
+      if (!tutorialArtifact || !nextPromptArtifact) {
+        return;
+      }
 
-    const definition = this.#loadDefinitionOrThrow(run.workflow_id);
-    const transition = findWorkflowTransition(definition, {
-      fromStateId: run.current_state_id,
-      event: 'artifacts.ready',
-    });
-    if (!transition) {
-      throw new Error(`Workflow "${definition.id}" has no transition for event "artifacts.ready".`);
-    }
-
-    const plannerSession = await this.#loadPlanningSession(run.id);
-    if (plannerSession) {
-      await this.#sessions.saveSession({
-        ...plannerSession,
-        state_id: 'step_approval',
-        updated_at: this.#clock(),
-        metadata: {
-          ...plannerSession.metadata,
-          ...stringMetadata({
-            prompt_id: 'planner_conversation',
-          }),
-        },
+      const definition = this.#loadDefinitionOrThrow(run.workflow_id);
+      const transition = findWorkflowTransition(definition, {
+        fromStateId: run.current_state_id,
+        event: 'artifacts.ready',
       });
-    }
+      if (!transition) {
+        throw new Error(`Workflow "${definition.id}" has no transition for event "artifacts.ready".`);
+      }
 
-    await this.#transitionRun({
-      run,
-      transition,
-      sessionId: plannerSession?.id ?? null,
-      threadId: plannerSession?.thread_id ?? null,
-      metadata: stringMetadata({
-        tutorial_artifact_id: tutorialArtifact.id,
-        next_prompt_artifact_id: nextPromptArtifact.id,
-      }),
-      gateMetadata: stringMetadata({
-        tutorial_artifact_id: tutorialArtifact.id,
-        tutorial_artifact_content: tutorialArtifact.content,
-        next_prompt_artifact_id: nextPromptArtifact.id,
-        next_prompt_artifact_content: nextPromptArtifact.content,
-        prompt_candidate: nextPromptArtifact.content,
-        approved_prompt_candidate:
-          nextPromptArtifact.metadata.approved_prompt_candidate ??
-          tutorialArtifact.metadata.approved_prompt_candidate ??
-          null,
-      }),
+      const plannerSession = await this.#loadPlanningSession(run.id);
+      if (plannerSession) {
+        await this.#sessions.saveSession({
+          ...plannerSession,
+          state_id: 'step_approval',
+          updated_at: this.#clock(),
+          metadata: {
+            ...plannerSession.metadata,
+            ...stringMetadata({
+              prompt_id: 'planner_conversation',
+            }),
+          },
+        });
+      }
+
+      await this.#transitionRun({
+        run,
+        transition,
+        sessionId: plannerSession?.id ?? null,
+        threadId: plannerSession?.thread_id ?? null,
+        metadata: stringMetadata({
+          tutorial_artifact_id: tutorialArtifact.id,
+          next_prompt_artifact_id: nextPromptArtifact.id,
+        }),
+        gateMetadata: stringMetadata({
+          tutorial_artifact_id: tutorialArtifact.id,
+          tutorial_artifact_content: tutorialArtifact.content,
+          next_prompt_artifact_id: nextPromptArtifact.id,
+          next_prompt_artifact_content: nextPromptArtifact.content,
+          prompt_candidate: nextPromptArtifact.content,
+          approved_prompt_candidate:
+            nextPromptArtifact.metadata.approved_prompt_candidate ??
+            tutorialArtifact.metadata.approved_prompt_candidate ??
+            null,
+        }),
+      });
     });
   }
 
