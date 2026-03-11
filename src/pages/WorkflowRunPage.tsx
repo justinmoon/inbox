@@ -1,8 +1,9 @@
-import { startTransition, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { startTransition, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import type { WorkflowRunDetail, WorkflowRunSessionDetail } from '../../shared/api.ts';
 import type {
   GateRecord,
+  RunEventRecord,
   SwarmRunAgentView,
   SwarmTimelineEntry,
   WorkflowArtifactRecord,
@@ -75,14 +76,21 @@ function findReadyArtifact(
     return null;
   }
 
-  for (let index = detail.artifacts.length - 1; index >= 0; index -= 1) {
-    const artifact = detail.artifacts[index];
-    if (artifact && artifact.kind === kind && artifact.status === 'ready') {
-      return artifact;
-    }
-  }
+  return (
+    detail.artifacts
+      .filter((artifact) => artifact.kind === kind && artifact.status === 'ready')
+      .sort((a, b) => {
+        const aTimestamp = a.completed_at ?? a.updated_at ?? a.created_at;
+        const bTimestamp = b.completed_at ?? b.updated_at ?? b.created_at;
+        const timestampOrder = bTimestamp.localeCompare(aTimestamp);
+        if (timestampOrder !== 0) {
+          return timestampOrder;
+        }
 
-  return null;
+        return b.id.localeCompare(a.id);
+      })
+      .at(0) ?? null
+  );
 }
 
 function findActiveSession(detail: WorkflowRunDetail | null) {
@@ -177,6 +185,106 @@ function currentProgressState(detail: WorkflowRunDetail | null, openGate: GateRe
     return 'making_progress';
   }
   return 'idle';
+}
+
+function latestEventSequence(detail: WorkflowRunDetail | null) {
+  return detail?.events.at(-1)?.sequence ?? 0;
+}
+
+function parseTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function describeRelativeTime(value: string | null | undefined, nowMs: number) {
+  const parsed = parseTimestamp(value);
+  if (parsed == null) {
+    return 'Unavailable';
+  }
+
+  const deltaMs = Math.max(0, nowMs - parsed);
+  const seconds = Math.round(deltaMs / 1000);
+  if (seconds < 5) {
+    return 'Just now';
+  }
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.round(minutes / 60);
+  return `${hours}h ago`;
+}
+
+function deriveDisplayedProgressState(args: {
+  detail: WorkflowRunDetail | null;
+  swarmView: WorkflowRunDetail['swarm'];
+  openGate: GateRecord | null;
+  nowMs: number;
+}) {
+  const activity = args.swarmView?.activity ?? null;
+  if (!activity) {
+    return currentProgressState(args.detail, args.openGate);
+  }
+
+  if (activity.progress_state === 'making_progress' || activity.progress_state === 'quiet_but_active') {
+    const freshnessAnchor = Math.max(
+      parseTimestamp(activity.last_meaningful_event_at) ?? Number.NEGATIVE_INFINITY,
+      parseTimestamp(activity.active_turn_started_at) ?? Number.NEGATIVE_INFINITY,
+    );
+    if (Number.isFinite(freshnessAnchor)) {
+      return args.nowMs - freshnessAnchor <= 20_000 ? 'making_progress' : 'quiet_but_active';
+    }
+  }
+
+  if (activity.progress_state === 'recently_updated') {
+    const lastMeaningfulAt = parseTimestamp(activity.last_meaningful_event_at);
+    if (lastMeaningfulAt != null && args.nowMs - lastMeaningfulAt > 45_000) {
+      return 'idle';
+    }
+  }
+
+  return activity.progress_state;
+}
+
+function progressStatePillClass(value: string) {
+  switch (value) {
+    case 'waiting_on_user':
+    case 'stalled':
+      return 'workflow-state-pill-amber';
+    case 'failed':
+      return 'workflow-state-pill-red';
+    case 'completed':
+    case 'recently_updated':
+      return 'workflow-state-pill-green';
+    case 'idle':
+      return 'workflow-state-pill-slate';
+    default:
+      return 'workflow-state-pill-blue';
+  }
+}
+
+function progressStateDescription(value: string) {
+  const descriptions: Record<string, string> = {
+    making_progress: 'Active work is moving and recent runtime events confirm it.',
+    quiet_but_active: 'The current turn is still running, but the runtime has been quiet for a bit.',
+    recently_updated: 'Background work just advanced and is between active turns.',
+    stalled: 'The current turn timed out or stopped making progress and needs attention.',
+    waiting_on_user: 'The run is paused on an explicit user gate.',
+    idle: 'No active turn is running right now.',
+    failed: 'The run failed and needs manual recovery.',
+    completed: 'The run has completed its current workflow.',
+  };
+
+  return descriptions[value] ?? 'Runtime progress is being tracked from persisted workflow state.';
 }
 
 function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetail }) {
@@ -387,27 +495,78 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
     lastEventAt: null,
     lastType: null,
   });
+  const [liveEvent, setLiveEvent] = useState<RunEventRecord | null>(null);
+  const [clockMs, setClockMs] = useState(() => Date.now());
+  const activeRunIdRef = useRef<string | null>(runId);
+  const detailRequestIdRef = useRef(0);
+  const runsRequestIdRef = useRef(0);
+  const latestExpectedEventSequenceRef = useRef(0);
+  const latestAppliedDetailSequenceRef = useRef(0);
 
   const plannerSession = useMemo(() => findPlannerSession(detail), [detail]);
   const openApprovalGate = useMemo(() => findOpenApprovalGate(detail), [detail]);
   const tutorialArtifact = useMemo(() => findReadyArtifact(detail, 'tutorial_artifact'), [detail]);
   const nextPromptArtifact = useMemo(() => findReadyArtifact(detail, 'next_prompt_artifact'), [detail]);
   const swarmView = detail?.swarm ?? null;
+  const activityView = swarmView?.activity ?? null;
   const activeAgentLabel = useMemo(
-    () => currentActiveAgentLabel(detail, swarmView, openApprovalGate),
-    [detail, swarmView, openApprovalGate],
+    () => activityView?.active_agent_title ?? currentActiveAgentLabel(detail, swarmView, openApprovalGate),
+    [activityView, detail, swarmView, openApprovalGate],
   );
-  const activeWorkspacePath = useMemo(() => currentWorkspacePath(detail), [detail]);
-  const lastEvent = detail?.events.at(-1) ?? null;
+  const activeWorkspacePath = useMemo(
+    () => activityView?.authoritative_workspace_path ?? currentWorkspacePath(detail),
+    [activityView, detail],
+  );
+  const lastEvent = useMemo(() => {
+    const detailEvent = detail?.events.at(-1) ?? null;
+    if (!liveEvent) {
+      return detailEvent;
+    }
+    if (!detailEvent || liveEvent.sequence >= detailEvent.sequence) {
+      return liveEvent;
+    }
+    return detailEvent;
+  }, [detail, liveEvent]);
   const lastSuccessfulRuntimeEvent = useMemo(() => findLastSuccessfulRuntimeEvent(detail), [detail]);
-  const progressState = useMemo(() => currentProgressState(detail, openApprovalGate), [detail, openApprovalGate]);
+  const lastMeaningfulEvent = activityView?.last_meaningful_event ?? null;
+  const progressState = useMemo(
+    () => deriveDisplayedProgressState({ detail, swarmView, openGate: openApprovalGate, nowMs: clockMs }),
+    [clockMs, detail, openApprovalGate, swarmView],
+  );
   const workflowTitle = detail
     ? swarmView?.definition.title ?? getWorkflowTitle(definitions, detail.run.workflow_id)
     : workflowId;
+  const progressPillClass = progressStatePillClass(progressState);
+  const progressDescription = progressStateDescription(progressState);
 
   useEffect(() => {
     document.documentElement.dataset.theme = readThemeId();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClockMs(Date.now());
+    }, 5_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    activeRunIdRef.current = runId;
+    latestExpectedEventSequenceRef.current = 0;
+    latestAppliedDetailSequenceRef.current = 0;
+    setLiveEvent(null);
+  }, [runId]);
+
+  useEffect(() => {
+    const appliedSequence = detail && detail.run.id === runId ? latestEventSequence(detail) : 0;
+    latestAppliedDetailSequenceRef.current = appliedSequence;
+    latestExpectedEventSequenceRef.current = Math.max(latestExpectedEventSequenceRef.current, appliedSequence);
+    if (liveEvent && appliedSequence >= liveEvent.sequence) {
+      setLiveEvent(null);
+    }
+  }, [detail, liveEvent, runId]);
 
   useEffect(() => {
     if (!workflowId && definitions[0]?.id) {
@@ -448,13 +607,21 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
     }
 
     const activeRunId = runId;
+    const immediateRefreshEventTypes = new Set([
+      'state_transition',
+      'gate_opened',
+      'gate_answered',
+      'tutorial_artifact_persisted',
+      'next_prompt_artifact_persisted',
+      'review_result_detected',
+    ]);
 
     let refreshTimer: number | null = null;
     let pollingTimer: number | null = null;
     let source: EventSource | null = null;
     let disposed = false;
 
-    function scheduleRefresh() {
+    function scheduleRefresh(delayMs = 180) {
       if (refreshTimer !== null) {
         window.clearTimeout(refreshTimer);
       }
@@ -464,7 +631,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
           void refreshRuns();
           void refreshDetail(activeRunId);
         }
-      }, 180);
+      }, delayMs);
     }
 
     function beginPolling() {
@@ -505,15 +672,29 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
           return;
         }
 
+        if (payload?.method === 'workflow-run/event') {
+          latestExpectedEventSequenceRef.current = Math.max(
+            latestExpectedEventSequenceRef.current,
+            payload.params.event.sequence,
+          );
+          setLiveEvent(payload.params.event);
+        }
+
         setLiveUpdates((current) => ({
           mode: 'events',
           runId: activeRunId,
           eventCount: current.runId === activeRunId ? current.eventCount + 1 : 1,
-          lastEventAt: new Date().toISOString(),
+          lastEventAt:
+            payload?.method === 'workflow-run/event' ? payload.params.event.created_at : current.lastEventAt,
           lastType:
             payload?.method === 'workflow-run/event' ? payload.params.event.type : current.lastType,
         }));
-        scheduleRefresh();
+        scheduleRefresh(
+          payload?.method === 'workflow-run/event' &&
+            immediateRefreshEventTypes.has(payload.params.event.type)
+            ? 40
+            : 180,
+        );
       };
       source.onerror = () => {
         source?.close();
@@ -552,25 +733,73 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   }
 
   async function refreshRuns() {
+    const requestId = ++runsRequestIdRef.current;
     setLoadingRuns(true);
     try {
       const nextRuns = await fetchWorkflowRuns();
+      if (requestId !== runsRequestIdRef.current) {
+        return;
+      }
       setRuns(nextRuns);
       setDetailError(null);
     } catch (error) {
+      if (requestId !== runsRequestIdRef.current) {
+        return;
+      }
       setDetailError(error instanceof Error ? error.message : 'Failed to load workflow runs.');
     } finally {
-      setLoadingRuns(false);
+      if (requestId === runsRequestIdRef.current) {
+        setLoadingRuns(false);
+      }
     }
   }
 
   async function refreshDetail(nextRunId: string) {
+    const requestId = ++detailRequestIdRef.current;
     setLoadingDetail(true);
     try {
       const nextDetail = await fetchWorkflowRunDetail(nextRunId);
-      setDetail(nextDetail);
+      if (nextRunId !== activeRunIdRef.current) {
+        return;
+      }
+
+      const nextSequence = latestEventSequence(nextDetail);
+      if (nextSequence < latestExpectedEventSequenceRef.current) {
+        window.setTimeout(() => {
+          if (activeRunIdRef.current === nextRunId) {
+            void refreshDetail(nextRunId);
+          }
+        }, 120);
+        return;
+      }
+
+      if (
+        requestId !== detailRequestIdRef.current &&
+        nextSequence <= latestAppliedDetailSequenceRef.current
+      ) {
+        return;
+      }
+
+      if (nextSequence < latestAppliedDetailSequenceRef.current) {
+        return;
+      }
+
+      latestAppliedDetailSequenceRef.current = nextSequence;
+      latestExpectedEventSequenceRef.current = Math.max(latestExpectedEventSequenceRef.current, nextSequence);
+      setDetail((current) => {
+        const currentSequence =
+          current && current.run.id === nextDetail.run.id ? latestEventSequence(current) : -1;
+        if (currentSequence > nextSequence) {
+          return current;
+        }
+
+        return nextDetail;
+      });
       setDetailError(null);
     } catch (error) {
+      if (nextRunId !== activeRunIdRef.current || requestId !== detailRequestIdRef.current) {
+        return;
+      }
       if (error instanceof RequestError && error.status === 404) {
         setDetail(null);
         onNavigate('/workflow-runs', true);
@@ -580,7 +809,9 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
       setDetailError(error instanceof Error ? error.message : 'Failed to load workflow run.');
     } finally {
-      setLoadingDetail(false);
+      if (requestId === detailRequestIdRef.current) {
+        setLoadingDetail(false);
+      }
     }
   }
 
@@ -697,6 +928,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
           className="workflow-panel workflow-primary-panel"
           data-workflow-primary-surface="planning_conversation"
           data-workflow-planner-status={plannerSession?.session.activity_status ?? 'idle'}
+          data-workflow-panel-priority="primary"
         >
           <header className="workflow-panel-header">
             <div>
@@ -808,9 +1040,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
         return (
           <section
-            className="workflow-panel workflow-primary-panel"
+            className="workflow-panel workflow-primary-panel workflow-primary-panel-gate"
             data-workflow-primary-surface="step_approval"
             data-workflow-gate-id={openApprovalGate.id}
+            data-workflow-panel-priority="dominant"
           >
             <header className="workflow-panel-header">
               <div>
@@ -910,9 +1143,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
       const abortOption = openApprovalGate.options.find((option) => option.id === 'abort') ?? null;
       return (
         <section
-          className="workflow-panel workflow-primary-panel"
+          className="workflow-panel workflow-primary-panel workflow-primary-panel-gate"
           data-workflow-primary-surface="approval_gate"
           data-workflow-gate-id={openApprovalGate.id}
+          data-workflow-panel-priority="dominant"
         >
           <header className="workflow-panel-header">
             <div>
@@ -977,21 +1211,50 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
 
     return (
       <section
-        className="workflow-panel workflow-primary-panel"
+        className="workflow-panel workflow-primary-panel workflow-primary-panel-background"
         data-workflow-primary-surface="background"
+        data-workflow-panel-priority="primary"
+        data-workflow-subphase={activityView?.subphase_id ?? detail.run.current_state_id}
+        data-workflow-progress-freshness={progressState}
       >
         <header className="workflow-panel-header">
           <div>
             <p className="workflow-card-kicker">Runtime State</p>
-            <h2>{humanizeToken(detail.run.current_state_id)}</h2>
+            <h2>{activityView?.subphase_title ?? humanizeToken(detail.run.current_state_id)}</h2>
           </div>
-          <span className="workflow-state-pill workflow-state-pill-green">
-            {humanizeToken(detail.run.current_state_family)}
+          <span className={`workflow-state-pill ${progressPillClass}`}>
+            {humanizeToken(progressState)}
           </span>
         </header>
-        <p className="workflow-muted-copy">
-          Background execution is active. The session list below shows the planner and implementer state honestly.
-        </p>
+        <p className="workflow-muted-copy">{progressDescription}</p>
+
+        <div className="workflow-background-status-grid">
+          <article className="workflow-goal-card">
+            <p className="workflow-card-kicker">Active Agent</p>
+            <strong>{activeAgentLabel}</strong>
+            <p className="workflow-muted-copy">
+              {activityView?.active_thread_id ? <code>{activityView.active_thread_id}</code> : 'No active thread id yet.'}
+            </p>
+          </article>
+
+          <article className="workflow-goal-card">
+            <p className="workflow-card-kicker">Workspace</p>
+            <code>{activeWorkspacePath ?? 'unavailable'}</code>
+            <p className="workflow-muted-copy">
+              Authoritative surfaced workspace for the current background step.
+            </p>
+          </article>
+
+          <article className="workflow-goal-card">
+            <p className="workflow-card-kicker">Last Meaningful Progress</p>
+            <strong>{lastMeaningfulEvent?.title ?? 'No milestone yet'}</strong>
+            <p className="workflow-muted-copy">
+              {lastMeaningfulEvent
+                ? `${lastMeaningfulEvent.summary} • ${describeRelativeTime(lastMeaningfulEvent.timestamp, clockMs)}`
+                : 'The runtime has not recorded a meaningful progress milestone yet.'}
+            </p>
+          </article>
+        </div>
       </section>
     );
   }
@@ -1112,7 +1375,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
         </section>
       </aside>
 
-      <main className="workflow-runtime-main">
+      <main
+        className="workflow-runtime-main"
+        data-workflow-user-input={openApprovalGate ? 'true' : 'false'}
+      >
         {detailError ? (
           <div className="banner banner-error">
             <strong>Runtime request failed.</strong>
@@ -1137,13 +1403,17 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
         )}
 
         {detail ? (
-          <div className="workflow-runtime-grid" data-workflow-run-id={detail.run.id}>
+          <div
+            className={`workflow-runtime-grid${openApprovalGate ? ' is-gate-open' : ''}`}
+            data-workflow-run-id={detail.run.id}
+          >
             <section
-              className="workflow-panel workflow-swarm-panel"
+              className="workflow-panel workflow-swarm-panel workflow-panel-secondary"
               data-workflow-swarm-overview="true"
               data-swarm-top-level-state={swarmView?.top_level_state ?? ''}
               data-workflow-current-state={detail.run.current_state_id}
               data-workflow-current-state-family={detail.run.current_state_family}
+              data-workflow-panel-priority={openApprovalGate ? 'secondary' : 'normal'}
             >
               <header className="workflow-panel-header">
                 <div>
@@ -1205,7 +1475,10 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel">
+            <section
+              className="workflow-panel"
+              data-workflow-panel-priority={openApprovalGate ? 'secondary' : 'normal'}
+            >
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Run Detail</p>
@@ -1250,6 +1523,7 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                       data-workflow-live-update-mode={liveUpdates.mode}
                       data-workflow-live-update-count={String(liveUpdates.eventCount)}
                       data-workflow-live-update-last-type={liveUpdates.lastType ?? ''}
+                      data-workflow-live-update-last-at={liveUpdates.lastEventAt ?? ''}
                     >
                       {liveUpdates.mode === 'events'
                         ? `SSE${liveUpdates.eventCount > 0 ? ` (${liveUpdates.eventCount})` : ''}`
@@ -1280,18 +1554,45 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                     </dd>
                   </div>
                   <div>
-                    <dt>Progress</dt>
-                    <dd data-workflow-progress-status={progressState}>
-                      {humanizeToken(progressState)}
+                    <dt>Subphase</dt>
+                    <dd
+                      data-workflow-subphase={activityView?.subphase_id ?? detail.run.current_state_id}
+                    >
+                      {activityView?.subphase_title ?? humanizeToken(detail.run.current_state_id)}
                     </dd>
                   </div>
                   <div>
-                    <dt>Last event</dt>
+                    <dt>Progress</dt>
+                    <dd
+                      data-workflow-progress-status={progressState}
+                      data-workflow-progress-freshness={progressState}
+                    >
+                      <span className={`workflow-state-pill ${progressPillClass}`}>
+                        {humanizeToken(progressState)}
+                      </span>
+                      <span className="workflow-inline-muted"> {progressDescription}</span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Last meaningful progress</dt>
+                    <dd
+                      data-workflow-last-meaningful-type={lastMeaningfulEvent?.type ?? ''}
+                      data-workflow-last-meaningful-at={lastMeaningfulEvent?.timestamp ?? ''}
+                    >
+                      {lastMeaningfulEvent
+                        ? `${lastMeaningfulEvent.summary} • ${describeRelativeTime(lastMeaningfulEvent.timestamp, clockMs)}`
+                        : 'No meaningful progress recorded yet.'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Latest runtime event</dt>
                     <dd
                       data-workflow-last-event-type={lastEvent?.type ?? ''}
                       data-workflow-last-event-summary={lastEvent?.summary ?? ''}
                     >
-                      {lastEvent?.summary ?? 'No runtime events yet.'}
+                      {lastEvent
+                        ? `${lastEvent.summary} • ${describeRelativeTime(lastEvent.created_at, clockMs)}`
+                        : 'No runtime events yet.'}
                     </dd>
                   </div>
                 </dl>
@@ -1305,7 +1606,11 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               </div>
             </section>
 
-            <section className="workflow-panel" data-workflow-gate-panel="true">
+            <section
+              className="workflow-panel workflow-panel-secondary"
+              data-workflow-gate-panel="true"
+              data-workflow-panel-priority={openApprovalGate ? 'secondary' : 'normal'}
+            >
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Gate Artifact</p>
@@ -1351,7 +1656,11 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel workflow-artifacts-panel" data-workflow-artifacts-panel="true">
+            <section
+              className="workflow-panel workflow-artifacts-panel workflow-panel-secondary"
+              data-workflow-artifacts-panel="true"
+              data-workflow-panel-priority={openApprovalGate ? 'secondary' : 'normal'}
+            >
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Artifacts</p>
@@ -1369,7 +1678,11 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel workflow-events-panel" data-workflow-timeline="true">
+            <section
+              className="workflow-panel workflow-events-panel workflow-panel-secondary"
+              data-workflow-timeline="true"
+              data-workflow-panel-priority={openApprovalGate ? 'secondary' : 'normal'}
+            >
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Timeline</p>
@@ -1393,7 +1706,11 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
               )}
             </section>
 
-            <section className="workflow-panel workflow-sessions-panel" data-workflow-sessions-panel="true">
+            <section
+              className="workflow-panel workflow-sessions-panel workflow-panel-secondary"
+              data-workflow-sessions-panel="true"
+              data-workflow-panel-priority={openApprovalGate ? 'secondary' : 'normal'}
+            >
               <header className="workflow-panel-header">
                 <div>
                   <p className="workflow-card-kicker">Sessions</p>

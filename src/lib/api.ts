@@ -98,13 +98,18 @@ export async function fetchWorkflowDefinition(id: string): Promise<WorkflowDefin
 }
 
 export async function fetchWorkflowRuns(): Promise<WorkflowRunRecord[]> {
-  const response = await requestJson<{ runs: WorkflowRunRecord[] }>('/api/workflow-runs');
+  const response = await requestJson<{ runs: WorkflowRunRecord[] }>('/api/workflow-runs', {
+    cache: 'no-store',
+  });
   return response.runs;
 }
 
 export async function fetchWorkflowRunDetail(id: string): Promise<WorkflowRunDetail> {
   const response = await requestJson<{ detail: WorkflowRunDetail }>(
     `/api/workflow-runs/${encodeURIComponent(id)}`,
+    {
+      cache: 'no-store',
+    },
   );
   return response.detail;
 }

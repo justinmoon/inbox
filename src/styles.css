@@ -2310,6 +2310,26 @@ body.is-resizing-replay {
   box-shadow: var(--shadow);
 }
 
+.workflow-primary-panel {
+  box-shadow:
+    0 24px 64px rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.workflow-primary-panel-gate {
+  border-color: var(--amber-soft);
+  background:
+    radial-gradient(circle at top right, rgba(250, 204, 21, 0.1), transparent 30%),
+    linear-gradient(180deg, var(--surface-softest), var(--surface-warm));
+}
+
+.workflow-primary-panel-background {
+  border-color: rgba(96, 165, 250, 0.22);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 28%),
+    linear-gradient(180deg, var(--surface-softest), var(--surface-soft));
+}
+
 .workflow-panel-empty {
   min-height: 14rem;
   justify-content: center;
@@ -2489,10 +2509,18 @@ body.is-resizing-replay {
   overflow: auto;
 }
 
+.workflow-inline-muted {
+  color: var(--ink-soft);
+}
+
 .workflow-runtime-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+}
+
+.workflow-runtime-grid.is-gate-open {
+  gap: 1.1rem;
 }
 
 .workflow-swarm-panel,
@@ -2500,6 +2528,19 @@ body.is-resizing-replay {
 .workflow-sessions-panel,
 .workflow-events-panel {
   grid-column: 1 / -1;
+}
+
+.workflow-runtime-main[data-workflow-user-input='true'] .workflow-panel-secondary {
+  background: linear-gradient(180deg, var(--surface-soft), var(--surface-muted));
+  opacity: 0.88;
+}
+
+.workflow-runtime-main[data-workflow-user-input='true'] .workflow-panel-secondary .workflow-panel-header h2 {
+  font-size: 1.18rem;
+}
+
+.workflow-runtime-main[data-workflow-user-input='true'] .workflow-panel-secondary .workflow-card-kicker {
+  color: var(--ink-soft);
 }
 
 .workflow-swarm-node-grid {
@@ -2558,6 +2599,12 @@ body.is-resizing-replay {
 }
 
 .workflow-step-packet-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.workflow-background-status-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.8rem;
@@ -2724,7 +2771,8 @@ body.is-resizing-replay {
   }
 
   .workflow-swarm-node-grid,
-  .workflow-step-packet-grid {
+  .workflow-step-packet-grid,
+  .workflow-background-status-grid {
     grid-template-columns: 1fr;
   }
 

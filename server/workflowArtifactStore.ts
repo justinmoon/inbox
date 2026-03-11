@@ -62,7 +62,16 @@ export class WorkflowArtifactStore {
     const artifacts = await readJsonMap(this.#filePath, (value) => workflowArtifactSchema.parse(value));
     return Object.values(artifacts)
       .filter((artifact) => artifact.run_id === runId)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      .sort((a, b) => {
+        const aTimestamp = a.completed_at ?? a.updated_at ?? a.created_at;
+        const bTimestamp = b.completed_at ?? b.updated_at ?? b.created_at;
+        const timestampOrder = aTimestamp.localeCompare(bTimestamp);
+        if (timestampOrder !== 0) {
+          return timestampOrder;
+        }
+
+        return a.id.localeCompare(b.id);
+      });
   }
 
   async getArtifact(id: string): Promise<WorkflowArtifactRecord | null> {

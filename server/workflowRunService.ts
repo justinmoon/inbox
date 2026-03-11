@@ -638,7 +638,7 @@ export class WorkflowRunService {
 
     return {
       ...detail,
-      swarm: buildWorkflowRunSwarmView(detail),
+      swarm: buildWorkflowRunSwarmView(detail, { now: this.#clock() }),
     };
   }
 

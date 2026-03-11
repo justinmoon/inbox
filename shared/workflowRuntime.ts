@@ -16,6 +16,16 @@ export const swarmAgentKinds = ['hub', 'worker'] as const;
 export const swarmRunTopLevelStates = ['working', 'needs_user_input', 'failed', 'completed'] as const;
 export const swarmRunAgentStatuses = ['idle', 'working', 'stalled', 'waiting_on_user', 'failed'] as const;
 export const swarmTimelineEmphasis = ['session', 'turn', 'marker', 'gate', 'transition', 'system'] as const;
+export const swarmProgressStates = [
+  'making_progress',
+  'recently_updated',
+  'quiet_but_active',
+  'stalled',
+  'waiting_on_user',
+  'idle',
+  'failed',
+  'completed',
+] as const;
 
 export const workflowRepositoryInputSchema = z
   .object({
@@ -147,6 +157,7 @@ export type SwarmAgentKind = (typeof swarmAgentKinds)[number];
 export type SwarmRunTopLevelState = (typeof swarmRunTopLevelStates)[number];
 export type SwarmRunAgentStatus = (typeof swarmRunAgentStatuses)[number];
 export type SwarmTimelineEmphasis = (typeof swarmTimelineEmphasis)[number];
+export type SwarmProgressState = (typeof swarmProgressStates)[number];
 
 export type WorkflowRepositoryInput = z.infer<typeof workflowRepositoryInputSchema>;
 export type GateOptionRecord = z.infer<typeof gateOptionSchema>;
@@ -368,12 +379,36 @@ export type SwarmTimelineEntry = {
   turn_id: string | null;
 };
 
+export type SwarmRunActivityEventView = {
+  event_id: string;
+  event_sequence: number;
+  type: string;
+  title: string;
+  summary: string;
+  timestamp: string;
+};
+
+export type SwarmRunActivityView = {
+  progress_state: SwarmProgressState;
+  active_agent_id: string | null;
+  active_agent_title: string | null;
+  active_session_id: string | null;
+  active_thread_id: string | null;
+  authoritative_workspace_path: string | null;
+  subphase_id: string;
+  subphase_title: string;
+  active_turn_started_at: string | null;
+  last_meaningful_event: SwarmRunActivityEventView | null;
+  last_meaningful_event_at: string | null;
+};
+
 export type WorkflowRunSwarmView = {
   definition: SwarmDefinitionSummary;
   top_level_state: SwarmRunTopLevelState;
   active_state_id: string;
   active_state_family: WorkflowStateFamily;
   current_gate: SwarmCurrentGateView | null;
+  activity: SwarmRunActivityView;
   agents: SwarmRunAgentView[];
   timeline: SwarmTimelineEntry[];
   graph_mermaid: string;

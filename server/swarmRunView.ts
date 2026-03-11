@@ -5,6 +5,8 @@ import type {
   SwarmCurrentGateView,
   SwarmDefinitionDetail,
   SwarmDefinitionSummary,
+  SwarmProgressState,
+  SwarmRunActivityView,
   SwarmRunAgentView,
   SwarmRunTopLevelState,
   SwarmTimelineEntry,
@@ -23,8 +25,37 @@ type WorkflowRunSwarmInput = {
   events: RunEventRecord[];
 };
 
+const ACTIVE_PROGRESS_WINDOW_MS = 20_000;
+const RECENT_UPDATE_WINDOW_MS = 45_000;
+
 function humanizeToken(value: string) {
   return value.replaceAll('_', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function parseTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function latestTimestamp(values: Array<string | null | undefined>) {
+  let bestTimestamp: string | null = null;
+  let bestValue = Number.NEGATIVE_INFINITY;
+
+  for (const value of values) {
+    const parsed = parseTimestamp(value);
+    if (parsed == null || parsed <= bestValue) {
+      continue;
+    }
+
+    bestValue = parsed;
+    bestTimestamp = value ?? null;
+  }
+
+  return bestTimestamp;
 }
 
 function mermaidNodeId(prefix: string, id: string) {
@@ -133,6 +164,96 @@ export function deriveSwarmRunTopLevelState(args: {
   }
 
   return 'working';
+}
+
+function eventOrder(a: RunEventRecord, b: RunEventRecord) {
+  if (a.sequence !== b.sequence) {
+    return a.sequence - b.sequence;
+  }
+
+  const timestampOrder = a.created_at.localeCompare(b.created_at);
+  if (timestampOrder !== 0) {
+    return timestampOrder;
+  }
+
+  return a.id.localeCompare(b.id);
+}
+
+function isMeaningfulProgressEvent(event: RunEventRecord) {
+  if (
+    event.type.endsWith('_failed') ||
+    event.type.endsWith('_timed_out') ||
+    event.type.endsWith('_runtime_failed') ||
+    event.type.endsWith('_startup_failed') ||
+    event.type === 'workspace_contract_violated'
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function subphaseTitle(stateId: string) {
+  const labels: Record<string, string> = {
+    planning_conversation: 'Planning the next worker step',
+    first_prompt_approval: 'Reviewing the first worker prompt',
+    implementing: 'Implementer is executing the approved step',
+    auto_review: 'Planner is reviewing implementer output',
+    fixup_implementing: 'Implementer is applying a review fixup',
+    artifact_forking: 'Artifact workers are preparing the approval packet',
+    step_approval: 'Reviewing the next-step packet',
+    completed: 'Workflow completed',
+    failed: 'Workflow failed',
+  };
+
+  return labels[stateId] ?? humanizeToken(stateId);
+}
+
+function deriveProgressState(args: {
+  run: WorkflowRunRecord;
+  topLevelState: SwarmRunTopLevelState;
+  activeSession: WorkflowRunSessionDetail | null;
+  stalledSession: WorkflowRunSessionDetail | null;
+  lastMeaningfulEvent: RunEventRecord | null;
+  now: string;
+}): SwarmProgressState {
+  if (args.run.current_state_id === 'failed' || args.run.status === 'failed') {
+    return 'failed';
+  }
+
+  if (args.run.status === 'completed') {
+    return 'completed';
+  }
+
+  if (args.topLevelState === 'needs_user_input') {
+    return 'waiting_on_user';
+  }
+
+  if (args.stalledSession) {
+    return 'stalled';
+  }
+
+  const now = parseTimestamp(args.now);
+  const lastMeaningfulAt = parseTimestamp(args.lastMeaningfulEvent?.created_at);
+  const activeTurnStartedAt = parseTimestamp(args.activeSession?.session.active_turn_started_at);
+
+  if (args.activeSession?.session.active_turn_id) {
+    const freshnessAnchor = Math.max(
+      lastMeaningfulAt ?? Number.NEGATIVE_INFINITY,
+      activeTurnStartedAt ?? Number.NEGATIVE_INFINITY,
+    );
+    if (now != null && Number.isFinite(freshnessAnchor)) {
+      return now - freshnessAnchor <= ACTIVE_PROGRESS_WINDOW_MS ? 'making_progress' : 'quiet_but_active';
+    }
+
+    return 'making_progress';
+  }
+
+  if (now != null && lastMeaningfulAt != null && now - lastMeaningfulAt <= RECENT_UPDATE_WINDOW_MS) {
+    return 'recently_updated';
+  }
+
+  return 'idle';
 }
 
 function buildAgentViews(
@@ -250,30 +371,86 @@ function buildTimeline(
   sessionAgentIds: Map<string, string>,
 ): SwarmTimelineEntry[] {
   return [...input.events]
-    .sort((a, b) => {
-      if (a.sequence !== b.sequence) {
-        return a.sequence - b.sequence;
-      }
-
-      const timestampOrder = a.created_at.localeCompare(b.created_at);
-      if (timestampOrder !== 0) {
-        return timestampOrder;
-      }
-
-      return a.id.localeCompare(b.id);
-    })
+    .sort(eventOrder)
     .map((event) => ({
-    id: `timeline_${event.id}`,
-    event_id: event.id,
-    event_sequence: event.sequence,
-    timestamp: event.created_at,
-    emphasis: eventEmphasis(event),
-    title: eventTitle(event),
-    summary: event.summary,
-    agent_id: event.session_id ? sessionAgentIds.get(event.session_id) ?? null : null,
-    session_id: event.session_id ?? null,
-    turn_id: event.turn_id ?? null,
-  }));
+      id: `timeline_${event.id}`,
+      event_id: event.id,
+      event_sequence: event.sequence,
+      timestamp: event.created_at,
+      emphasis: eventEmphasis(event),
+      title: eventTitle(event),
+      summary: event.summary,
+      agent_id: event.session_id ? sessionAgentIds.get(event.session_id) ?? null : null,
+      session_id: event.session_id ?? null,
+      turn_id: event.turn_id ?? null,
+    }));
+}
+
+function buildActivityView(args: {
+  input: WorkflowRunSwarmInput;
+  currentGate: SwarmCurrentGateView | null;
+  topLevelState: SwarmRunTopLevelState;
+  agents: SwarmRunAgentView[];
+  sessionAgentIds: Map<string, string>;
+  now: string;
+}): SwarmRunActivityView {
+  const sortedEvents = [...args.input.events].sort(eventOrder);
+  const lastMeaningfulEvent =
+    [...sortedEvents].reverse().find((event) => isMeaningfulProgressEvent(event)) ?? null;
+  const activeSession =
+    args.input.sessions.find((sessionDetail) => Boolean(sessionDetail.session.active_turn_id)) ?? null;
+  const stalledSession =
+    args.input.sessions.find((sessionDetail) => sessionDetail.session.activity_status === 'stalled') ?? null;
+  const currentSession = activeSession ?? stalledSession ?? args.input.sessions.at(-1) ?? null;
+
+  const activeAgentId =
+    args.currentGate
+      ? 'user'
+      : currentSession?.session.id
+        ? args.sessionAgentIds.get(currentSession.session.id) ?? currentSession.session.actor
+        : args.agents.find((agent) => agent.status === 'working' || agent.status === 'stalled')?.agent_id ?? null;
+  const activeAgentTitle =
+    activeAgentId === 'user'
+      ? 'User'
+      : args.agents.find((agent) => agent.agent_id === activeAgentId)?.title ??
+        (currentSession ? humanizeToken(currentSession.session.actor) : null);
+  const authoritativeWorkspacePath =
+    currentSession?.session.cwd ??
+    args.input.sessions.findLast((sessionDetail) => Boolean(sessionDetail.session.cwd))?.session.cwd ??
+    null;
+
+  return {
+    progress_state: deriveProgressState({
+      run: args.input.run,
+      topLevelState: args.topLevelState,
+      activeSession,
+      stalledSession,
+      lastMeaningfulEvent,
+      now: args.now,
+    }),
+    active_agent_id: activeAgentId,
+    active_agent_title: activeAgentTitle,
+    active_session_id: currentSession?.session.id ?? null,
+    active_thread_id: currentSession?.session.thread_id ?? null,
+    authoritative_workspace_path: authoritativeWorkspacePath,
+    subphase_id: args.input.run.current_state_id,
+    subphase_title: subphaseTitle(args.input.run.current_state_id),
+    active_turn_started_at:
+      activeSession?.session.active_turn_started_at ??
+      latestTimestamp(args.input.sessions.map((sessionDetail) => sessionDetail.session.active_turn_started_at)),
+    last_meaningful_event:
+      lastMeaningfulEvent == null
+        ? null
+        : {
+            event_id: lastMeaningfulEvent.id,
+            event_sequence: lastMeaningfulEvent.sequence,
+            type: lastMeaningfulEvent.type,
+            title: eventTitle(lastMeaningfulEvent),
+            summary: lastMeaningfulEvent.summary,
+            timestamp: lastMeaningfulEvent.created_at,
+          },
+    last_meaningful_event_at: lastMeaningfulEvent?.created_at ?? null,
+  };
 }
 
 function renderRunSwarmMermaid(args: {
@@ -321,7 +498,12 @@ function renderRunSwarmMermaid(args: {
   return lines.join('\n');
 }
 
-export function buildWorkflowRunSwarmView(input: WorkflowRunSwarmInput): WorkflowRunSwarmView | null {
+export function buildWorkflowRunSwarmView(
+  input: WorkflowRunSwarmInput,
+  args?: {
+    now?: string;
+  },
+): WorkflowRunSwarmView | null {
   const definition = swarmDefinitions.readDefinition(input.run.workflow_id);
   if (!definition) {
     return null;
@@ -334,6 +516,14 @@ export function buildWorkflowRunSwarmView(input: WorkflowRunSwarmInput): Workflo
   const currentGate = buildCurrentGate(definition, input.open_gates[0] ?? null);
   const { agents, sessionAgentIds } = buildAgentViews(definition, input, currentGate, topLevelState);
   const timeline = buildTimeline(input, sessionAgentIds);
+  const activity = buildActivityView({
+    input,
+    currentGate,
+    topLevelState,
+    agents,
+    sessionAgentIds,
+    now: args?.now ?? new Date().toISOString(),
+  });
 
   return {
     definition: summarizeDefinition(definition),
@@ -341,6 +531,7 @@ export function buildWorkflowRunSwarmView(input: WorkflowRunSwarmInput): Workflo
     active_state_id: input.run.current_state_id,
     active_state_family: input.run.current_state_family,
     current_gate: currentGate,
+    activity,
     agents,
     timeline,
     graph_mermaid: renderRunSwarmMermaid({

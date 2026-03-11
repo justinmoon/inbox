@@ -765,6 +765,7 @@ app.post('/api/workflow-runs', async (req, res) => {
 
 app.get('/api/workflow-runs', async (_req, res) => {
   try {
+    res.setHeader('Cache-Control', 'no-store');
     res.json(await listWorkflowRuns());
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to list workflow runs.';
@@ -774,6 +775,7 @@ app.get('/api/workflow-runs', async (_req, res) => {
 
 app.get('/api/workflow-runs/:id', async (req, res) => {
   try {
+    res.setHeader('Cache-Control', 'no-store');
     const detail = await readWorkflowRun(req.params.id);
     if (!detail) {
       res.status(404).json({

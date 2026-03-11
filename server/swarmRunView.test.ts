@@ -344,3 +344,168 @@ test('swarm view derives artifact-worker timeline and step gate routing from run
   assert.equal(swarm?.timeline[4]?.emphasis, 'marker');
   assert.equal(swarm?.graph_mermaid.includes('approve via Planner delegates implementation'), true);
 });
+
+test('swarm view derives healthy active progress and current work context', () => {
+  const swarm = buildWorkflowRunSwarmView(
+    {
+      run: createRun({
+        current_state_id: 'implementing',
+        current_state_family: 'background',
+      }),
+      sessions: [
+        createPlannerSession({
+          session: {
+            ...createPlannerSession().session,
+            state_id: 'auto_review',
+            cwd: '/tmp/repo/implementer-workspace',
+          },
+        }),
+        {
+          session: {
+            ...createWorkerSession({
+              id: 'session_implementer',
+              kind: 'implementing',
+              actor: 'implementer',
+              state_id: 'implementing',
+              thread_id: 'thr_2',
+            }).session,
+            status: 'active',
+            active_turn_id: 'turn_2',
+            active_turn_started_at: '2026-03-10T00:00:20.000Z',
+            latest_turn_id: 'turn_1',
+            latest_turn_completed_at: '2026-03-10T00:00:10.000Z',
+            activity_status: 'running',
+            cwd: '/tmp/repo/implementer-workspace',
+            updated_at: '2026-03-10T00:00:20.000Z',
+          },
+          thread: null,
+          load_error: null,
+        },
+      ],
+      open_gates: [],
+      events: [
+        createEvent('implementer_turn_started', 'Implementer turn started.', {
+          sequence: 1,
+          state_id: 'implementing',
+          session_id: 'session_implementer',
+          thread_id: 'thr_2',
+          turn_id: 'turn_2',
+          created_at: '2026-03-10T00:00:20.000Z',
+        }),
+      ],
+    },
+    { now: '2026-03-10T00:00:32.000Z' },
+  );
+
+  assert.ok(swarm);
+  assert.equal(swarm?.activity.progress_state, 'making_progress');
+  assert.equal(swarm?.activity.active_agent_id, 'implementer');
+  assert.equal(swarm?.activity.active_agent_title, 'Implementer');
+  assert.equal(swarm?.activity.authoritative_workspace_path, '/tmp/repo/implementer-workspace');
+  assert.equal(swarm?.activity.subphase_id, 'implementing');
+  assert.equal(swarm?.activity.last_meaningful_event?.type, 'implementer_turn_started');
+});
+
+test('swarm view distinguishes quiet active work, recent updates, and stalled planning', () => {
+  const quietActive = buildWorkflowRunSwarmView(
+    {
+      run: createRun({
+        current_state_id: 'implementing',
+        current_state_family: 'background',
+      }),
+      sessions: [
+        {
+          session: {
+            ...createWorkerSession({
+              id: 'session_implementer',
+              kind: 'implementing',
+              actor: 'implementer',
+              state_id: 'implementing',
+              thread_id: 'thr_2',
+            }).session,
+            status: 'active',
+            active_turn_id: 'turn_2',
+            active_turn_started_at: '2026-03-10T00:00:20.000Z',
+            activity_status: 'running',
+            cwd: '/tmp/repo/implementer-workspace',
+          },
+          thread: null,
+          load_error: null,
+        },
+      ],
+      open_gates: [],
+      events: [
+        createEvent('implementer_turn_started', 'Implementer turn started.', {
+          sequence: 1,
+          state_id: 'implementing',
+          session_id: 'session_implementer',
+          created_at: '2026-03-10T00:00:20.000Z',
+        }),
+      ],
+    },
+    { now: '2026-03-10T00:01:10.000Z' },
+  );
+  assert.equal(quietActive?.activity.progress_state, 'quiet_but_active');
+
+  const recentlyUpdated = buildWorkflowRunSwarmView(
+    {
+      run: createRun({
+        current_state_id: 'artifact_forking',
+        current_state_family: 'background',
+      }),
+      sessions: [
+        createPlannerSession({
+          session: {
+            ...createPlannerSession().session,
+            state_id: 'artifact_forking',
+            cwd: '/tmp/repo/implementer-workspace',
+          },
+        }),
+      ],
+      open_gates: [],
+      events: [
+        createEvent('review_result_detected', 'Review result detected.', {
+          sequence: 1,
+          state_id: 'artifact_forking',
+          session_id: 'session_planner',
+          created_at: '2026-03-10T00:00:40.000Z',
+        }),
+      ],
+    },
+    { now: '2026-03-10T00:01:05.000Z' },
+  );
+  assert.equal(recentlyUpdated?.activity.progress_state, 'recently_updated');
+
+  const stalledPlanning = buildWorkflowRunSwarmView(
+    {
+      run: createRun(),
+      sessions: [
+        createPlannerSession({
+          session: {
+            ...createPlannerSession().session,
+            active_turn_id: 'turn_1',
+            active_turn_started_at: '2026-03-10T00:00:00.000Z',
+            activity_status: 'stalled',
+            stalled_at: '2026-03-10T00:00:10.000Z',
+            stall_reason: 'timeout',
+            last_error: 'Timeout waiting for turn turn_1 to complete.',
+            updated_at: '2026-03-10T00:00:10.000Z',
+          },
+        }),
+      ],
+      open_gates: [],
+      events: [
+        createEvent('planner_turn_timed_out', 'Planner turn timed out and is recoverable.', {
+          sequence: 1,
+          state_id: 'planning_conversation',
+          session_id: 'session_planner',
+          turn_id: 'turn_1',
+          created_at: '2026-03-10T00:00:10.000Z',
+        }),
+      ],
+    },
+    { now: '2026-03-10T00:00:30.000Z' },
+  );
+  assert.equal(stalledPlanning?.activity.progress_state, 'stalled');
+  assert.equal(stalledPlanning?.activity.active_agent_id, 'planner');
+});

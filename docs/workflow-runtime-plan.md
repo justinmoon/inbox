@@ -1010,6 +1010,56 @@ Broader reliability work is still missing:
 - automatic detection of a turn that completed after the runtime already marked it stalled
 - richer backoff / health policies beyond this one recoverable timeout path
 
+## Live Progress And Freshness
+
+The workflow route now derives a small current-work snapshot from runtime truth instead of relying on a generic "working" label alone.
+
+The swarm projection now carries:
+
+- `activity.progress_state`
+  - `making_progress`
+  - `recently_updated`
+  - `quiet_but_active`
+  - `stalled`
+  - `waiting_on_user`
+  - `idle`
+  - `failed`
+  - `completed`
+- `activity.active_agent_id` / `activity.active_agent_title`
+- `activity.authoritative_workspace_path`
+- `activity.subphase_id` / `activity.subphase_title`
+- `activity.active_turn_started_at`
+- `activity.last_meaningful_event`
+
+This is intentionally lightweight:
+
+- open gate => `waiting_on_user`
+- stalled session => `stalled`
+- active turn + recent milestone => `making_progress`
+- active turn + older milestone => `quiet_but_active`
+- no active turn + recent non-failure milestone => `recently_updated`
+
+The goal is not a general health engine. The goal is to stop healthy background turns from feeling frozen while still making real stalls obvious.
+
+## Gate And Artifact Freshness
+
+The workflow route now treats runtime event sequence as the freshness floor for detail refresh.
+
+That means:
+
+- workflow run SSE events still carry the persisted run event
+- the browser tracks the highest seen event sequence for the active run
+- detail refreshes that come back older than the latest seen sequence are ignored and re-fetched instead of overwriting newer truth
+- workflow run GETs are now explicitly `no-store`
+
+This keeps gate packets and artifact views aligned with persisted runtime truth during fast background transitions, especially around:
+
+- accepted review -> `artifact_forking`
+- tutorial / next-prompt worker completion
+- `step_approval` gate opening
+
+The route also now visually demotes the graph / timeline / session walls when a gate is open so the approval packet remains the dominant decision surface.
+
 ## Remaining Gaps Before Later Loops And Landing Flows
 
 Still intentionally missing:
