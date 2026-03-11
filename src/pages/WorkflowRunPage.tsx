@@ -84,6 +84,72 @@ function findReadyArtifact(
   return null;
 }
 
+function findActiveSession(detail: WorkflowRunDetail | null) {
+  return detail?.sessions.find((entry) => entry.session.active_turn_id) ?? null;
+}
+
+function currentWorkspacePath(detail: WorkflowRunDetail | null) {
+  const activeSession = findActiveSession(detail);
+  if (activeSession?.session.cwd) {
+    return activeSession.session.cwd;
+  }
+
+  if (!detail) {
+    return null;
+  }
+
+  for (let index = detail.sessions.length - 1; index >= 0; index -= 1) {
+    const session = detail.sessions[index];
+    if (session?.session.cwd) {
+      return session.session.cwd;
+    }
+  }
+
+  return null;
+}
+
+function currentActiveAgentLabel(
+  detail: WorkflowRunDetail | null,
+  swarmView: WorkflowRunDetail['swarm'],
+  openGate: GateRecord | null,
+) {
+  if (openGate) {
+    return 'User';
+  }
+
+  const activeSession = findActiveSession(detail);
+  if (activeSession) {
+    return humanizeToken(activeSession.session.actor);
+  }
+
+  const swarmAgent = swarmView?.agents.find((agent) => agent.status === 'working') ?? null;
+  if (swarmAgent) {
+    return swarmAgent.title;
+  }
+
+  return 'Idle';
+}
+
+function currentProgressState(detail: WorkflowRunDetail | null, openGate: GateRecord | null) {
+  if (!detail) {
+    return 'idle';
+  }
+
+  if (detail.run.status === 'failed') {
+    return 'failed';
+  }
+  if (detail.run.status === 'completed') {
+    return 'completed';
+  }
+  if (openGate) {
+    return 'waiting_on_user';
+  }
+  if (findActiveSession(detail)) {
+    return 'making_progress';
+  }
+  return 'idle';
+}
+
 function SessionCard({ sessionDetail }: { sessionDetail: WorkflowRunSessionDetail }) {
   const { session, thread, load_error } = sessionDetail;
 
@@ -289,6 +355,13 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
   const tutorialArtifact = useMemo(() => findReadyArtifact(detail, 'tutorial_artifact'), [detail]);
   const nextPromptArtifact = useMemo(() => findReadyArtifact(detail, 'next_prompt_artifact'), [detail]);
   const swarmView = detail?.swarm ?? null;
+  const activeAgentLabel = useMemo(
+    () => currentActiveAgentLabel(detail, swarmView, openApprovalGate),
+    [detail, swarmView, openApprovalGate],
+  );
+  const activeWorkspacePath = useMemo(() => currentWorkspacePath(detail), [detail]);
+  const lastEvent = detail?.events.at(-1) ?? null;
+  const progressState = useMemo(() => currentProgressState(detail, openApprovalGate), [detail, openApprovalGate]);
   const workflowTitle = detail
     ? swarmView?.definition.title ?? getWorkflowTitle(definitions, detail.run.workflow_id)
     : workflowId;
@@ -1078,6 +1151,42 @@ export function WorkflowRunPage({ runId, onNavigate }: WorkflowRunPageProps) {
                   </dd>
                 </div>
               </dl>
+
+              <div className="workflow-goal-card" data-workflow-activity-card="true">
+                <p className="workflow-card-kicker">Current Work</p>
+                <dl className="workflow-meta-grid">
+                  <div>
+                    <dt>Active agent</dt>
+                    <dd
+                      data-workflow-active-agent={activeAgentLabel}
+                      data-workflow-active-agent-kind={openApprovalGate ? 'user' : 'runtime'}
+                    >
+                      {activeAgentLabel}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Authoritative workspace</dt>
+                    <dd data-workflow-active-workspace={activeWorkspacePath ?? ''}>
+                      <code>{activeWorkspacePath ?? 'unavailable'}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Progress</dt>
+                    <dd data-workflow-progress-status={progressState}>
+                      {humanizeToken(progressState)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Last event</dt>
+                    <dd
+                      data-workflow-last-event-type={lastEvent?.type ?? ''}
+                      data-workflow-last-event-summary={lastEvent?.summary ?? ''}
+                    >
+                      {lastEvent?.summary ?? 'No runtime events yet.'}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
 
               <div className="workflow-goal-card">
                 <p className="workflow-card-kicker">Goal Prompt</p>

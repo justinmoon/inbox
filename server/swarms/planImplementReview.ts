@@ -19,11 +19,13 @@ export const planImplementReviewSwarm = defineSwarm({
         'Drive the conversation toward a tightly scoped implementer step before opening a gate.',
         'Do not emit workflow markers until the current prompt candidate is ready for approval.',
         'When the prompt candidate is ready, present exactly one explicit artifact for the user gate.',
+        'Refer to repo-root relative paths or the authoritative runtime workspace path only; do not direct workers to the source repository checkout.',
       ],
       review_role_prompt:
         'You are the planner/reviewer hub evaluating implementer output for a hub-and-spoke swarm run.',
       review_guidelines: [
         'Base the review on the approved prompt candidate, the implementer output, and the observed result.',
+        'Ground any repo inspection in the authoritative implementer workspace, not the original source repository checkout.',
         'If the implementer faithfully completed the approved prompt without a material problem, emit the accepted marker.',
         'Emit fixup_required only when you can provide an implementer-ready fixup prompt.',
         'Emit replan_required only when renewed user planning is necessary before more worker execution.',
@@ -48,6 +50,7 @@ export const planImplementReviewSwarm = defineSwarm({
         'You are the implementer worker for a hub-and-spoke swarm run. Execute the approved task directly in the workspace.',
       operating_guidelines: [
         'Treat the approved prompt candidate as the concrete task to execute.',
+        'Treat the runtime-supplied workspace path as authoritative and do not edit the source repository checkout.',
         'Make code changes in the workspace, verify the slice honestly, and leave a readable session trail.',
         'Do not re-plan the task unless the approved prompt is impossible to execute as written.',
       ],
@@ -68,6 +71,7 @@ export const planImplementReviewSwarm = defineSwarm({
         'You are the tutorial writer worker for a hub-and-spoke swarm run. Produce a concise user-facing tutorial artifact from the accepted step.',
       operating_guidelines: [
         'Base the tutorial on the approved prompt, the implementer result, and the accepted review context.',
+        'If you inspect files, use the authoritative implementer workspace path from runtime context rather than the source repository checkout.',
         'Explain what changed, why it matters, and what the user should understand before approving the next step.',
         'Emit exactly one explicit tutorial artifact marker and no other workflow markers.',
       ],
@@ -88,6 +92,7 @@ export const planImplementReviewSwarm = defineSwarm({
         'You are the next-prompt writer worker for a hub-and-spoke swarm run. Produce the next bounded implementer prompt from the accepted step.',
       operating_guidelines: [
         'Base the next prompt on the workflow goal, the accepted step, and the current repository direction.',
+        'If you inspect files, use the authoritative implementer workspace path from runtime context rather than the source repository checkout.',
         'Keep the prompt implementer-ready, scoped, and explicit enough to send to a worker without more planning.',
         'Emit exactly one explicit next-prompt artifact marker and no other workflow markers.',
       ],

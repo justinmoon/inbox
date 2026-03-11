@@ -1,4 +1,7 @@
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import type {
   CodexThread,
@@ -112,6 +115,52 @@ function normalizeTurnStatus(status: string): AgentTurnStatus {
       return 'interrupted';
     default:
       return 'running';
+  }
+}
+
+function isRemoteRepositorySource(source: string | null | undefined) {
+  return typeof source === 'string' && /^(https?:\/\/|ssh:\/\/|git@|file:\/\/)/.test(source);
+}
+
+async function runCommand(command: string, args: string[], cwd?: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolve(stdout.trimEnd());
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `${command} ${args.join(' ')} exited with code ${code}`));
+    });
+  });
+}
+
+async function git(args: string[], cwd: string) {
+  return await runCommand('git', args, cwd);
+}
+
+async function realpathOrResolve(targetPath: string) {
+  try {
+    return await fs.realpath(targetPath);
+  } catch {
+    return path.resolve(targetPath);
   }
 }
 
@@ -240,7 +289,13 @@ export class WorkflowRunService {
         runId: run.id,
         sessionId: session.id,
         promptId: prompt.id,
-        text: prompt.render({ run }),
+        text: prompt.render({
+          run,
+          runtime_context: {
+            planning_workspace_path: repositoryContext.workspace.path,
+            authoritative_workspace_path: repositoryContext.workspace.path,
+          },
+        }),
         source: 'initial_prompt',
         shouldResumeThread: false,
       });
@@ -484,6 +539,88 @@ export class WorkflowRunService {
     return { repository, workspace };
   }
 
+  async #buildWorkspaceContractMetadata(args: {
+    run: WorkflowRunRecord;
+    workspacePath: string | null;
+  }) {
+    const metadata = stringMetadata({
+      authoritative_workspace_path: args.workspacePath,
+    });
+    const sourceRepoPath = args.run.repo.repo_path;
+    if (!args.workspacePath || !sourceRepoPath || isRemoteRepositorySource(sourceRepoPath)) {
+      return metadata;
+    }
+
+    const [resolvedSourceRepoPath, resolvedWorkspacePath] = await Promise.all([
+      realpathOrResolve(sourceRepoPath),
+      realpathOrResolve(args.workspacePath),
+    ]);
+    if (resolvedSourceRepoPath === resolvedWorkspacePath) {
+      return metadata;
+    }
+
+    const sourceRepoStatus = await git(['status', '--porcelain'], resolvedSourceRepoPath);
+    return {
+      ...metadata,
+      source_repo_path: resolvedSourceRepoPath,
+      source_repo_status_before: sourceRepoStatus,
+    };
+  }
+
+  #rewriteTextForWorkspaceContract(args: {
+    text: string | null;
+    sourceRepoPath: string | null;
+    workspacePath: string | null;
+  }) {
+    const text = args.text?.trim();
+    if (!text) {
+      return null;
+    }
+
+    if (!args.sourceRepoPath || !args.workspacePath || args.sourceRepoPath === args.workspacePath) {
+      return text;
+    }
+
+    return text.split(args.sourceRepoPath).join(args.workspacePath);
+  }
+
+  async #enforceWorkspaceContract(args: {
+    run: WorkflowRunRecord;
+    session: AgentSessionRecord;
+    turnId: string;
+    summary: string;
+    transitionEvent: string;
+  }) {
+    const sourceRepoPath = args.session.metadata.source_repo_path ?? null;
+    const expectedSourceStatus = args.session.metadata.source_repo_status_before;
+    if (!sourceRepoPath || typeof expectedSourceStatus !== 'string') {
+      return true;
+    }
+
+    const currentSourceStatus = await git(['status', '--porcelain'], sourceRepoPath);
+    if (currentSourceStatus === expectedSourceStatus) {
+      return true;
+    }
+
+    await this.#transitionRunToFailed({
+      runId: args.run.id,
+      sessionId: args.session.id,
+      threadId: args.session.thread_id,
+      turnId: args.turnId,
+      eventType: 'workspace_contract_violated',
+      summary: args.summary,
+      error: new Error(
+        [
+          `Authoritative workspace: ${args.session.cwd ?? 'unavailable'}`,
+          `Source repository: ${sourceRepoPath}`,
+          'The source repository changed while worker execution was bound to a peer workspace.',
+        ].join('\n'),
+      ),
+      transitionEvent: args.transitionEvent,
+    });
+    return false;
+  }
+
   async #createPlanningSession(args: {
     run: WorkflowRunRecord;
     definitionId: string;
@@ -534,7 +671,10 @@ export class WorkflowRunService {
         created_at: now,
         updated_at: now,
         tags: ['workflow-runtime', state.family],
-        metadata: stringMetadata({ prompt_id: prompt.id }),
+        metadata: stringMetadata({
+          prompt_id: prompt.id,
+          authoritative_workspace_path: args.workspace.path,
+        }),
       };
 
       await this.#sessions.saveSession(session);
@@ -548,6 +688,7 @@ export class WorkflowRunService {
         metadata: stringMetadata({
           actor: session.actor,
           workspace_id: args.workspace.id,
+          workspace_path: args.workspace.path,
           prompt_id: prompt.id,
         }),
       });
@@ -861,12 +1002,17 @@ export class WorkflowRunService {
         continue;
       }
 
-      const promptCandidate =
+      const rawPromptCandidate =
         typeof parserResult === 'string'
           ? parserResult
           : isObject(parserResult) && typeof parserResult.prompt_candidate === 'string'
             ? parserResult.prompt_candidate
             : null;
+      const promptCandidate = this.#rewriteTextForWorkspaceContract({
+        text: rawPromptCandidate,
+        sourceRepoPath: run.repo.repo_path ?? null,
+        workspacePath: session.cwd,
+      });
 
       await this.#recordEvent({
         run,
@@ -1092,11 +1238,6 @@ export class WorkflowRunService {
     let threadId: string | null = null;
 
     try {
-      const implementerPrompt = this.#buildImplementerTurnText({
-        workflowId: args.run.workflow_id,
-        promptCandidate,
-        goalPrompt: args.run.goal_prompt,
-      });
       const workspaceResult = planningSession?.workspace_id
         ? await this.#workspaces.createWorkspace({
             source_workspace_id: planningSession.workspace_id,
@@ -1116,6 +1257,17 @@ export class WorkflowRunService {
               workflow_id: args.run.workflow_id,
             }),
           });
+      const workspaceContractMetadata = await this.#buildWorkspaceContractMetadata({
+        run: args.run,
+        workspacePath: workspaceResult.workspace.path,
+      });
+      const implementerPrompt = this.#buildImplementerTurnText({
+        workflowId: args.run.workflow_id,
+        promptCandidate,
+        goalPrompt: args.run.goal_prompt,
+        workspacePath: workspaceResult.workspace.path,
+        sourceRepoPath: args.run.repo.repo_path ?? null,
+      });
 
       await this.#recordEvent({
         run: args.run,
@@ -1124,6 +1276,7 @@ export class WorkflowRunService {
         state_id: args.run.current_state_id,
         metadata: stringMetadata({
           workspace_id: workspaceResult.workspace.id,
+          workspace_path: workspaceResult.workspace.path,
           repo_id: workspaceResult.repository.id,
         }),
       });
@@ -1160,6 +1313,7 @@ export class WorkflowRunService {
           prompt_candidate: promptCandidate,
           source_gate_id: args.sourceGate.id,
           source_gate_option_id: args.selectedOptionId,
+          ...workspaceContractMetadata,
         }),
       };
       await this.#sessions.saveSession(session);
@@ -1173,6 +1327,7 @@ export class WorkflowRunService {
         thread_id: session.thread_id,
         metadata: stringMetadata({
           workspace_id: workspaceResult.workspace.id,
+          workspace_path: workspaceResult.workspace.path,
           source_gate_id: args.sourceGate.id,
         }),
       });
@@ -1317,6 +1472,18 @@ export class WorkflowRunService {
       metadata: stringMetadata({ status: completion.status }),
     });
 
+    const workspaceContractOk = await this.#enforceWorkspaceContract({
+      run,
+      session: updatedSession,
+      turnId: args.turnId,
+      summary:
+        'Source repository changed while implementer execution was bound to a surfaced peer workspace.',
+      transitionEvent: 'implementer.failed',
+    });
+    if (!workspaceContractOk) {
+      return;
+    }
+
     const definition = this.#loadDefinitionOrThrow(run.workflow_id);
     const transition = findWorkflowTransition(definition, {
       fromStateId: run.current_state_id,
@@ -1392,6 +1559,8 @@ export class WorkflowRunService {
         ...session,
         state_id: state.id,
         status: 'active',
+        workspace_id: args.implementerSession.workspace_id,
+        cwd: args.implementerSession.cwd,
         updated_at: this.#clock(),
         metadata: {
           ...session.metadata,
@@ -1399,6 +1568,7 @@ export class WorkflowRunService {
             prompt_id: prompt.id,
             last_reviewed_turn_id: args.implementerTurnId,
             last_reviewed_thread_id: args.implementerSession.thread_id,
+            authoritative_workspace_path: args.implementerSession.cwd,
           }),
         },
       };
@@ -1447,6 +1617,8 @@ export class WorkflowRunService {
           prompt_id: prompt.id,
           reviewed_turn_id: args.implementerTurnId,
           implementer_thread_id: args.implementerSession.thread_id,
+          workspace_id: preparedSession.workspace_id,
+          workspace_path: preparedSession.cwd,
         }),
       });
     } catch (error) {
@@ -1752,6 +1924,10 @@ export class WorkflowRunService {
         ...this.#codexExecution,
         persistExtendedHistory: true,
       });
+      const workspaceContractMetadata = await this.#buildWorkspaceContractMetadata({
+        run: args.run,
+        workspacePath: session.cwd,
+      });
 
       const preparedSession: AgentSessionRecord = {
         ...session,
@@ -1763,6 +1939,7 @@ export class WorkflowRunService {
           ...stringMetadata({
             prompt_candidate: promptCandidate,
             fixup_review_turn_id: args.reviewTurnId,
+            ...workspaceContractMetadata,
           }),
         },
       };
@@ -1774,6 +1951,8 @@ export class WorkflowRunService {
           workflowId: args.run.workflow_id,
           promptCandidate,
           goalPrompt: args.run.goal_prompt,
+          workspacePath: preparedSession.cwd,
+          sourceRepoPath: args.run.repo.repo_path ?? null,
           promptLabel: 'Fixup prompt',
         }),
         cwd: preparedSession.cwd,
@@ -1999,6 +2178,7 @@ export class WorkflowRunService {
           prompt_id: prompt.id,
           parent_thread_id: args.plannerSession.thread_id,
           artifact_kind: config.artifactKind,
+          authoritative_workspace_path: args.plannerSession.cwd,
         }),
       };
       await this.#sessions.saveSession(session);
@@ -2037,6 +2217,8 @@ export class WorkflowRunService {
           artifact_id: artifact.id,
           artifact_kind: artifact.kind,
           prompt_id: prompt.id,
+          workspace_id: session.workspace_id,
+          workspace_path: session.cwd,
         }),
       });
 
@@ -2084,6 +2266,8 @@ export class WorkflowRunService {
           artifact_id: artifact.id,
           artifact_kind: artifact.kind,
           prompt_id: prompt.id,
+          workspace_id: updatedSession.workspace_id,
+          workspace_path: updatedSession.cwd,
         }),
       });
     } catch (error) {
@@ -2628,13 +2812,21 @@ export class WorkflowRunService {
     workflowId: string;
     promptCandidate: string;
     goalPrompt: string;
+    workspacePath: string | null;
+    sourceRepoPath: string | null;
     promptLabel?: string;
   }) {
     const swarm = this.#swarms.getDefinition(args.workflowId);
     const implementer = swarm?.agents.find((agent) => agent.id === 'implementer') ?? null;
+    const workspaceBoundPrompt =
+      this.#rewriteTextForWorkspaceContract({
+        text: args.promptCandidate,
+        sourceRepoPath: args.sourceRepoPath,
+        workspacePath: args.workspacePath,
+      }) ?? args.promptCandidate;
 
     if (!implementer) {
-      return args.promptCandidate;
+      return workspaceBoundPrompt;
     }
 
     return [
@@ -2646,8 +2838,14 @@ export class WorkflowRunService {
       'Workflow goal:',
       args.goalPrompt,
       '',
+      'Authoritative workspace path:',
+      args.workspacePath ?? 'Unavailable.',
+      '',
+      'Use repo-root relative paths or the authoritative workspace path above.',
+      'Do not edit the original source repository checkout or any other directory.',
+      '',
       `${args.promptLabel ?? 'Approved prompt candidate'}:`,
-      args.promptCandidate,
+      workspaceBoundPrompt,
     ].join('\n');
   }
 }

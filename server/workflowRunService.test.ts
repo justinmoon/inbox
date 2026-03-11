@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -235,16 +236,44 @@ class FakeCodexClient implements CodexClient {
   async respondError() {}
 }
 
+async function runCommandIn(cwd: string, command: string, args: string[]) {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `${command} ${args.join(' ')} exited with code ${code}`));
+    });
+  });
+}
+
 function createWorkspaceHarness(repoPath: string) {
   const timestamp = '2026-03-10T00:00:00.000Z';
   const createdWorkspaces: WorkspaceRecord[] = [];
+  const runtimeRoot = path.join(path.dirname(repoPath), 'runtime');
+  const visibleRootPath = path.join(runtimeRoot, 'workspaces', 'sample-repo');
+  const visibleTrunkPath = path.join(visibleRootPath, 'trunk');
   const repository: RepositoryRecord = {
     id: 'sample-repo',
     provider: 'shared-store-worktree',
     source: repoPath,
-    backing_store_path: path.join(repoPath, '.store'),
-    visible_root_path: path.join(repoPath, '.visible'),
-    visible_trunk_path: path.join(repoPath, '.visible', 'trunk'),
+    backing_store_path: path.join(runtimeRoot, 'repositories', 'sample-repo', 'store'),
+    visible_root_path: visibleRootPath,
+    visible_trunk_path: visibleTrunkPath,
     trunk_workspace_id: 'sample-repo--trunk',
     created_at: timestamp,
     updated_at: timestamp,
@@ -257,7 +286,7 @@ function createWorkspaceHarness(repoPath: string) {
     provider: 'shared-store-worktree',
     strategy: 'shared-store-worktree',
     name: 'trunk',
-    path: path.join(repoPath, '.visible', 'trunk'),
+    path: visibleTrunkPath,
     source_ref: { kind: 'branch', branch: 'main' },
     current_head: 'abc123',
     created_at: timestamp,
@@ -304,7 +333,7 @@ function createWorkspaceHarness(repoPath: string) {
         provider: 'shared-store-worktree',
         strategy: 'shared-store-worktree',
         name: request.name_hint ?? 'child',
-        path: path.join(repoPath, '.visible', request.name_hint ?? 'child'),
+        path: path.join(visibleRootPath, request.name_hint ?? 'child'),
         source_ref: request.source_workspace_id
           ? { kind: 'workspace', workspace_id: request.source_workspace_id }
           : { kind: 'branch', branch: 'main' },
@@ -314,6 +343,7 @@ function createWorkspaceHarness(repoPath: string) {
         tags: request.tags ?? [],
         metadata: request.metadata ?? {},
       };
+      await fs.mkdir(nextWorkspace.path, { recursive: true });
       createdWorkspaces.push(nextWorkspace);
 
       return {
@@ -328,9 +358,16 @@ async function createHarness(turnPlans: TurnPlan[]) {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'inbox-workflow-run-test-'));
   const repoPath = path.join(rootDir, 'repo');
   await fs.mkdir(repoPath, { recursive: true });
+  await fs.writeFile(path.join(repoPath, 'README.md'), '# Test Repo\n', 'utf8');
+  await runCommandIn(repoPath, 'git', ['init', '-b', 'main']);
+  await runCommandIn(repoPath, 'git', ['config', 'user.name', 'Inbox Test']);
+  await runCommandIn(repoPath, 'git', ['config', 'user.email', 'test@inbox.local']);
+  await runCommandIn(repoPath, 'git', ['add', 'README.md']);
+  await runCommandIn(repoPath, 'git', ['commit', '-m', 'Initial test commit']);
 
   const codex = new FakeCodexClient(turnPlans);
   const workspaces = createWorkspaceHarness(repoPath);
+  await fs.mkdir(workspaces.workspace.path, { recursive: true });
   const service = new WorkflowRunService({
     definitions: new WorkflowDefinitionService([planImplementReviewWorkflow]),
     runs: new WorkflowRunStore(rootDir),
@@ -424,7 +461,10 @@ async function waitForSessionsToBecomeIdle(
   throw new Error(`Timed out waiting for sessions ${sessionKinds.join(', ')} to become idle.`);
 }
 
-async function moveRunToFirstPromptApproval(harness: Awaited<ReturnType<typeof createHarness>>) {
+async function moveRunToFirstPromptApproval(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  promptCandidate = 'Implement the runtime persistence and initial planner run path.',
+) {
   const created = await harness.service.createRun({
     workflow_id: 'plan-implement-review',
     repo_path: harness.repoPath,
@@ -439,8 +479,7 @@ async function moveRunToFirstPromptApproval(harness: Awaited<ReturnType<typeof c
       update.event.to_state_id === 'first_prompt_approval',
   );
   harness.codex.completeTurn('turn_1', {
-    assistantText:
-      '<first_prompt_candidate>Implement the runtime persistence and initial planner run path.</first_prompt_candidate>',
+    assistantText: `<first_prompt_candidate>${promptCandidate}</first_prompt_candidate>`,
   });
   await transitionUpdate;
 
@@ -595,6 +634,8 @@ test('planner turn prompt consumes swarm policy text', async () => {
     assert.match(plannerPrompt, /Operating guidelines:/);
     assert.match(plannerPrompt, /Current swarm target artifact: Prompt Candidate\./);
     assert.match(plannerPrompt, /Current user gate target: Prompt Candidate Approval\./);
+    assert.match(plannerPrompt, new RegExp(harness.workspaces.workspace.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(plannerPrompt, new RegExp(harness.repoPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }
@@ -879,8 +920,45 @@ test('implementer turn prompt consumes swarm policy text', async () => {
     assert.match(implementerPrompt, /implementer worker for a hub-and-spoke swarm run/i);
     assert.match(implementerPrompt, /Operating guidelines:/);
     assert.match(implementerPrompt, /Workflow goal:/);
+    assert.match(implementerPrompt, /Authoritative workspace path:/);
     assert.match(implementerPrompt, /Approved prompt candidate:/);
     assert.match(implementerPrompt, /Implement the runtime persistence and initial planner run path\./);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('implementer prompt rewrites source repo paths to the surfaced workspace path', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created, gate } = await moveRunToFirstPromptApproval(
+      harness,
+      `Edit ${harness.repoPath}/README.md and keep the change narrow.`,
+    );
+
+    const detail = await harness.service.answerGate({
+      runId: created.run.id,
+      gateId: gate.id,
+      optionId: 'approve',
+    });
+
+    const implementerSession = detail.sessions.find((session) => session.session.kind === 'implementing');
+    const implementerPrompt = firstTurnUserMessageText(implementerSession?.thread);
+
+    assert.ok(implementerSession?.session.cwd);
+    assert.match(
+      implementerPrompt,
+      new RegExp((implementerSession?.session.cwd ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
+    assert.doesNotMatch(
+      implementerPrompt,
+      new RegExp(harness.repoPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
+    assert.doesNotMatch(
+      gate.metadata.prompt_candidate ?? '',
+      new RegExp(harness.repoPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }
@@ -913,6 +991,28 @@ test('implementer completion triggers planner review', async () => {
   }
 });
 
+test('source repo dirtiness fails the run before review starts', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+    await fs.writeFile(path.join(harness.repoPath, 'README.md'), '# Dirty Source Repo\n', 'utf8');
+
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await harness.service.waitForIdle();
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    assert.equal(detail?.run.status, 'failed');
+    assert.equal(detail?.run.current_state_id, 'failed');
+    assert.equal(detail?.events.some((event) => event.type === 'workspace_contract_violated'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'review_turn_started'), false);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
 test('review prompt assembly consumes swarm review policy text', async () => {
   const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
 
@@ -937,6 +1037,32 @@ test('review prompt assembly consumes swarm review policy text', async () => {
     assert.match(reviewPrompt, /Expected review markers: review_accepted, review_fixup_required, review_replan_required/);
     assert.match(reviewPrompt, /Approved prompt candidate:/);
     assert.match(reviewPrompt, /Implementer output:/);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('review and artifact workers stay grounded in the implementer workspace', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
+
+  try {
+    const { created, detail } = await moveRunToArtifactForking(harness);
+    const implementerSession = detail?.sessions.find((session) => session.session.kind === 'implementing');
+    const plannerSession = detail?.sessions.find((session) => session.session.kind === 'planning_conversation');
+    const tutorialSession = detail?.sessions.find((session) => session.session.kind === 'tutorial_writing');
+    const nextPromptSession = detail?.sessions.find((session) => session.session.kind === 'next_prompt_writing');
+
+    assert.equal(plannerSession?.session.cwd, implementerSession?.session.cwd);
+    assert.equal(plannerSession?.session.workspace_id, implementerSession?.session.workspace_id);
+    assert.equal(tutorialSession?.session.cwd, implementerSession?.session.cwd);
+    assert.equal(nextPromptSession?.session.cwd, implementerSession?.session.cwd);
+    assert.equal(created.run.id, detail?.run.id);
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }

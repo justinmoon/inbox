@@ -1,17 +1,18 @@
 import { defineWorkflow, createBlockTagMarker, createSelfClosingTagMarker } from './runtime.ts';
 import { planImplementReviewSwarm } from '../swarms/planImplementReview.ts';
 
-function describeRepo(repoId: string | null, repoPath: string | null) {
-  if (repoId && repoPath) {
-    return `repo_id=${repoId}\nrepo_path=${repoPath}`;
-  }
+function describeRepoRegistration(repoId: string | null) {
   if (repoId) {
     return `repo_id=${repoId}`;
   }
-  if (repoPath) {
-    return `repo_path=${repoPath}`;
-  }
-  return 'repo locator unavailable';
+  return 'repo registration unavailable';
+}
+
+function workspacePathValue(
+  runtimeContext: Record<string, string | null> | undefined,
+  key: string,
+) {
+  return runtimeContext?.[key] ?? 'Unavailable.';
 }
 
 const firstPromptCandidateMarker = createBlockTagMarker({
@@ -481,15 +482,21 @@ export const planImplementReviewWorkflow = defineWorkflow({
       used_in_state_ids: ['planning_conversation'],
       output_marker_ids: ['first_prompt_candidate'],
       parser_hook_ids: ['parse_first_prompt_candidate'],
-      render({ run }) {
+      render({ run, runtime_context }) {
         return [
           ...renderAgentPolicyLines(plannerAgent),
           '',
           'Goal:',
           run.goal_prompt,
           '',
-          'Repository context:',
-          describeRepo(run.repo.repo_id, run.repo.repo_path),
+          'Repository registration:',
+          describeRepoRegistration(run.repo.repo_id),
+          '',
+          'Authoritative planning workspace:',
+          workspacePathValue(runtime_context, 'planning_workspace_path'),
+          '',
+          'Use repo-root relative paths or the authoritative workspace path above.',
+          'Do not inspect or direct work at the original source repository checkout path.',
           '',
           `Current swarm target artifact: ${promptCandidateArtifact.title}.`,
           `Current user gate target: ${promptCandidateGateRule.title}.`,
@@ -497,6 +504,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
           '',
           'Stay in discussion with the user until the first implementer step is scoped tightly enough to execute.',
           'When the plan is not ready yet, keep the conversation focused and do not emit any workflow markers.',
+          'When you emit the prompt candidate, use repo-root relative paths or the authoritative workspace path only.',
           'When the plan is ready, emit exactly one first prompt artifact using this marker protocol:',
           '<first_prompt_candidate>',
           '...first implementer prompt...',
@@ -522,14 +530,14 @@ export const planImplementReviewWorkflow = defineWorkflow({
           'Goal:',
           run.goal_prompt,
           '',
-          'Repository context:',
-          describeRepo(run.repo.repo_id, run.repo.repo_path),
+          'Repository registration:',
+          describeRepoRegistration(run.repo.repo_id),
+          '',
+          'Authoritative implementer workspace:',
+          runtimeContextValue(runtime_context, 'implementer_workspace_path', 'Unavailable.'),
           '',
           'Approved prompt candidate:',
           runtimeContextValue(runtime_context, 'approved_prompt_candidate', 'Unavailable.'),
-          '',
-          'Implementer workspace:',
-          runtimeContextValue(runtime_context, 'implementer_workspace_path', 'Unavailable.'),
           '',
           'Implementer thread:',
           runtimeContextValue(runtime_context, 'implementer_thread_id', 'Unavailable.'),
@@ -541,6 +549,9 @@ export const planImplementReviewWorkflow = defineWorkflow({
           '<review_result status="accepted" />',
           '<review_result status="fixup_required">...implementer fixup prompt...</review_result>',
           '<review_result status="replan_required">...what must be re-planned with the user...</review_result>',
+          '',
+          'If you inspect files, use the authoritative implementer workspace or repo-root relative paths within it.',
+          'Do not inspect or reason from the original source repository checkout path.',
           '',
           'Do not describe the verdict in free prose without the explicit marker.',
         ].join('\n');
@@ -566,11 +577,16 @@ export const planImplementReviewWorkflow = defineWorkflow({
           'Approved prompt candidate:',
           runtimeContextValue(runtime_context, 'approved_prompt_candidate', 'Unavailable.'),
           '',
+          'Authoritative implementer workspace:',
+          runtimeContextValue(runtime_context, 'implementer_workspace_path', 'Unavailable.'),
+          '',
           'Implementer output:',
           runtimeContextValue(runtime_context, 'implementer_output', 'Implementer output unavailable.'),
           '',
           'Accepted review context:',
           runtimeContextValue(runtime_context, 'review_output', 'Accepted review output unavailable.'),
+          '',
+          'If you inspect files, use the authoritative implementer workspace or repo-root relative paths within it.',
           '',
           'Emit exactly one artifact using:',
           '<tutorial>',
@@ -600,11 +616,17 @@ export const planImplementReviewWorkflow = defineWorkflow({
           'Approved prompt candidate:',
           runtimeContextValue(runtime_context, 'approved_prompt_candidate', 'Unavailable.'),
           '',
+          'Authoritative implementer workspace:',
+          runtimeContextValue(runtime_context, 'implementer_workspace_path', 'Unavailable.'),
+          '',
           'Implementer output:',
           runtimeContextValue(runtime_context, 'implementer_output', 'Implementer output unavailable.'),
           '',
           'Accepted review context:',
           runtimeContextValue(runtime_context, 'review_output', 'Accepted review output unavailable.'),
+          '',
+          'Keep the next prompt grounded in repo-root relative paths or the authoritative workspace path above.',
+          'Do not send the next worker back to the original source repository checkout path.',
           '',
           'Emit exactly one artifact using:',
           '<next_prompt>',

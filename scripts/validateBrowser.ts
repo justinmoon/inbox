@@ -134,6 +134,7 @@ async function getJson<T>(pathname: string): Promise<T> {
 
 async function createWorkflowValidationRepo() {
   const repoPath = path.join(validationRoot, 'workflow-runtime-validation-repo');
+  await fs.rm(repoPath, { recursive: true, force: true });
   await fs.mkdir(repoPath, { recursive: true });
   await fs.writeFile(
     path.join(repoPath, 'README.md'),
@@ -150,6 +151,10 @@ async function createWorkflowValidationRepo() {
   await runCommandIn(repoPath, 'git', ['add', 'README.md']);
   await runCommandIn(repoPath, 'git', ['commit', '-m', 'Initial validation repo']);
   return repoPath;
+}
+
+async function gitStatusShort(repoPath: string) {
+  return await runCommandIn(repoPath, 'git', ['status', '--short'], true);
 }
 
 async function assertSurfaceLoaded(expectedTitle: string, expectedStepTitles: string[]) {
@@ -1012,8 +1017,11 @@ async function assertWorkflowImplementingSurface(runId: string) {
       "    const currentState = document.querySelector('[data-workflow-current-state]')?.getAttribute('data-workflow-current-state');",
       "    const implementer = document.querySelector('[data-swarm-agent-id=\"implementer\"]')?.getAttribute('data-swarm-agent-status');",
       "    const implementerSession = document.querySelector('[data-workflow-session-kind=\"implementing\"]');",
+      "    const activeAgent = document.querySelector('[data-workflow-active-agent]')?.getAttribute('data-workflow-active-agent');",
+      "    const activeWorkspace = document.querySelector('[data-workflow-active-workspace]')?.getAttribute('data-workflow-active-workspace');",
+      "    const progress = document.querySelector('[data-workflow-progress-status]')?.getAttribute('data-workflow-progress-status');",
       "    const timelineTitles = [...document.querySelectorAll('[data-workflow-timeline-entry]')].map((node) => node.getAttribute('data-workflow-timeline-entry'));",
-      "    if (surface && topLevel === 'working' && currentState === 'implementing' && implementer === 'working' && implementerSession && timelineTitles.includes('Gate answered') && timelineTitles.includes('Implementer turn started')) {",
+      "    if (surface && topLevel === 'working' && currentState === 'implementing' && implementer === 'working' && implementerSession && activeAgent === 'Implementer' && activeWorkspace?.includes('/workspaces/') && progress === 'making_progress' && timelineTitles.includes('Gate answered') && timelineTitles.includes('Implementer turn started')) {",
       '      return;',
       '    }',
       '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
@@ -1077,10 +1085,14 @@ async function waitForWorkflowStepApprovalSurface(runId: string) {
       "    const topLevel = document.querySelector('[data-swarm-top-level-state]')?.getAttribute('data-swarm-top-level-state');",
       "    const currentState = document.querySelector('[data-workflow-current-state]')?.getAttribute('data-workflow-current-state');",
       "    const gate = document.querySelector('[data-swarm-current-gate]');",
+      "    const activeAgent = document.querySelector('[data-workflow-active-agent]')?.getAttribute('data-workflow-active-agent');",
+      "    const activeWorkspace = document.querySelector('[data-workflow-active-workspace]')?.getAttribute('data-workflow-active-workspace');",
+      "    const lastEvent = document.querySelector('[data-workflow-last-event-type]')?.getAttribute('data-workflow-last-event-type');",
+      "    const progress = document.querySelector('[data-workflow-progress-status]')?.getAttribute('data-workflow-progress-status');",
       "    const tutorial = document.querySelector('[data-workflow-step-tutorial=\"true\"] code')?.textContent?.trim() ?? '';",
       "    const nextPrompt = document.querySelector('[data-workflow-step-next-prompt=\"true\"] code')?.textContent?.trim() ?? '';",
       "    const timelineTitles = [...document.querySelectorAll('[data-workflow-timeline-entry]')].map((node) => node.getAttribute('data-workflow-timeline-entry'));",
-      "    if (surface && topLevel === 'needs_user_input' && currentState === 'step_approval' && gate && tutorial && nextPrompt && timelineTitles.includes('Review result detected') && timelineTitles.includes('Tutorial worker turn started') && timelineTitles.includes('Tutorial artifact persisted') && timelineTitles.includes('Next prompt worker turn started') && timelineTitles.includes('Next prompt artifact persisted') && timelineTitles.includes('Gate opened')) {",
+      "    if (surface && topLevel === 'needs_user_input' && currentState === 'step_approval' && gate && activeAgent === 'User' && activeWorkspace?.includes('/workspaces/') && progress === 'waiting_on_user' && lastEvent === 'gate_opened' && tutorial && nextPrompt && timelineTitles.includes('Review result detected') && timelineTitles.includes('Tutorial worker turn started') && timelineTitles.includes('Tutorial artifact persisted') && timelineTitles.includes('Next prompt worker turn started') && timelineTitles.includes('Next prompt artifact persisted') && timelineTitles.includes('Gate opened')) {",
       '      return;',
       '    }',
       '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
@@ -1089,6 +1101,8 @@ async function waitForWorkflowStepApprovalSurface(runId: string) {
       '})()',
     ].join(' '),
   );
+
+  return detail;
 }
 
 async function assertWorkflowRuntimeRoute(repoPath: string) {
@@ -1138,7 +1152,35 @@ async function assertWorkflowRuntimeRoute(repoPath: string) {
 
   await approveWorkflowGateFromBrowser();
   await assertWorkflowImplementingSurface(runId);
-  await waitForWorkflowStepApprovalSurface(runId);
+  const detail = await waitForWorkflowStepApprovalSurface(runId);
+  const implementerSession = detail.sessions?.find(
+    (sessionDetail: Record<string, any>) => sessionDetail.session?.kind === 'implementing',
+  );
+  const workspacePath = implementerSession?.session?.cwd;
+  if (typeof workspacePath !== 'string' || !workspacePath.includes('/workspaces/')) {
+    throw new Error(`Expected surfaced implementer workspace path under /workspaces/, saw ${workspacePath ?? 'missing'}.`);
+  }
+
+  const sourceStatus = await gitStatusShort(repoPath);
+  if (sourceStatus.trim()) {
+    throw new Error(`Source repo should stay clean while worker execution uses a peer workspace. Saw:\n${sourceStatus}`);
+  }
+
+  const workspaceStatus = await gitStatusShort(workspacePath);
+  if (!workspaceStatus.includes(workflowValidationNoteFile)) {
+    throw new Error(
+      `Expected surfaced workspace ${workspacePath} to contain the runtime validation change. Saw:\n${workspaceStatus || '(clean)'}`,
+    );
+  }
+
+  const sourceNotePath = path.join(repoPath, workflowValidationNoteFile);
+  const sourceNoteExists = await fs
+    .access(sourceNotePath)
+    .then(() => true)
+    .catch(() => false);
+  if (sourceNoteExists) {
+    throw new Error(`Source repo unexpectedly contains ${workflowValidationNoteFile}; the change should live only in the surfaced workspace.`);
+  }
 }
 
 await fs.mkdir(importedRoot, { recursive: true });

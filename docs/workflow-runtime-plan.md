@@ -945,6 +945,27 @@ The workflow route now shows a real step-approval packet with:
 
 This means the workflow-runtime route is now validated through the first real artifact-worker packet, not just through the accepted-review boundary.
 
+## Workspace Truth Contract
+
+The surfaced runtime workspace path is now the authoritative working directory for workflow execution.
+
+That means:
+
+- planning prompts describe the authoritative runtime workspace, not the original source checkout path
+- approved implementer prompts are rewritten against the authoritative workspace path if they accidentally mention the source repo path
+- review turns reuse the planner hub session, but are re-grounded onto the implementer workspace before execution
+- artifact workers inherit the accepted implementer workspace context, not the original source repo checkout
+
+The original local source repo path is still useful as repository registration metadata, but it is not the execution target once the runtime has created visible peer workspaces.
+
+The runtime now also records a small workspace-contract baseline for implementer turns:
+
+- authoritative workspace path
+- local source repo path when one exists
+- source repo `git status --porcelain` snapshot before worker execution
+
+If the source repo becomes dirty while the run was supposed to execute inside a peer workspace, the run now fails loudly with `workspace_contract_violated` instead of continuing into review or artifact generation.
+
 ## Remaining Gaps Before Later Loops And Landing Flows
 
 Still intentionally missing:
