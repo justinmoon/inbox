@@ -16,10 +16,18 @@ const canonicalBundlePath = path.join(
 
 type BundleLike = Record<string, any>;
 
-async function runCommand(command: string, args: string[], captureOutput = false): Promise<string> {
+const workflowValidationNoteFile = 'workflow-runtime-validation-note.md';
+const workflowValidationNoteBody = 'workflow runtime browser validation';
+
+async function runCommandIn(
+  cwd: string,
+  command: string,
+  args: string[],
+  captureOutput = false,
+): Promise<string> {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd: process.cwd(),
+      cwd,
       env: process.env,
       stdio: captureOutput ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     });
@@ -44,6 +52,10 @@ async function runCommand(command: string, args: string[], captureOutput = false
       reject(new Error(stderr.trim() || `${command} ${args.join(' ')} exited with code ${code}`));
     });
   });
+}
+
+async function runCommand(command: string, args: string[], captureOutput = false): Promise<string> {
+  return await runCommandIn(process.cwd(), command, args, captureOutput);
 }
 
 async function runBrowser(args: string[], captureOutput = false): Promise<string> {
@@ -118,6 +130,26 @@ async function getJson<T>(pathname: string): Promise<T> {
     throw new Error(String(payload?.message ?? `Request failed with ${response.status}`));
   }
   return payload as T;
+}
+
+async function createWorkflowValidationRepo() {
+  const repoPath = path.join(validationRoot, 'workflow-runtime-validation-repo');
+  await fs.mkdir(repoPath, { recursive: true });
+  await fs.writeFile(
+    path.join(repoPath, 'README.md'),
+    [
+      '# Workflow Runtime Validation Repo',
+      '',
+      'This tiny repository exists so browser validation can exercise the workflow runtime end to end.',
+    ].join('\n'),
+    'utf8',
+  );
+  await runCommandIn(repoPath, 'git', ['init', '-b', 'main']);
+  await runCommandIn(repoPath, 'git', ['config', 'user.name', 'Inbox Validate']);
+  await runCommandIn(repoPath, 'git', ['config', 'user.email', 'validate@inbox.local']);
+  await runCommandIn(repoPath, 'git', ['add', 'README.md']);
+  await runCommandIn(repoPath, 'git', ['commit', '-m', 'Initial validation repo']);
+  return repoPath;
 }
 
 async function assertSurfaceLoaded(expectedTitle: string, expectedStepTitles: string[]) {
@@ -992,13 +1024,68 @@ async function assertWorkflowImplementingSurface(runId: string) {
   );
 }
 
-async function assertWorkflowRuntimeRoute() {
+async function waitForWorkflowAcceptedReviewBoundary(runId: string) {
+  const detail = await waitForWorkflowRunDetail(
+    runId,
+    (nextDetail) =>
+      nextDetail.run?.current_state_id === 'artifact_forking' &&
+      nextDetail.swarm?.top_level_state === 'working' &&
+      Array.isArray(nextDetail.open_gates) &&
+      nextDetail.open_gates.length === 0 &&
+      Array.isArray(nextDetail.events) &&
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'implementer_turn_completed') &&
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'review_turn_started') &&
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'review_turn_completed') &&
+      nextDetail.events.some((event: Record<string, any>) => event.type === 'review_result_detected'),
+    'reach the accepted review boundary',
+    300_000,
+  );
+
+  const implementerSession = detail.sessions?.find(
+    (sessionDetail: Record<string, any>) => sessionDetail.session?.kind === 'implementing',
+  );
+  const workspacePath = implementerSession?.session?.cwd;
+  if (typeof workspacePath !== 'string' || !workspacePath) {
+    throw new Error('Accepted workflow run is missing the implementer workspace path.');
+  }
+
+  const validationNotePath = path.join(workspacePath, workflowValidationNoteFile);
+  const noteBody = await fs.readFile(validationNotePath, 'utf8').catch(() => null);
+  if (noteBody?.trim() !== workflowValidationNoteBody) {
+    throw new Error(
+      `Expected workflow validation note at ${validationNotePath} with exact body "${workflowValidationNoteBody}".`,
+    );
+  }
+
+  await browserEval(
+    [
+      '(async () => {',
+      '  const deadline = Date.now() + 30000;',
+      '  while (Date.now() < deadline) {',
+      "    const surface = document.querySelector('[data-workflow-primary-surface=\"background\"]');",
+      "    const topLevel = document.querySelector('[data-swarm-top-level-state]')?.getAttribute('data-swarm-top-level-state');",
+      "    const currentState = document.querySelector('[data-workflow-current-state]')?.getAttribute('data-workflow-current-state');",
+      "    const gate = document.querySelector('[data-swarm-current-gate]');",
+      "    const timelineTitles = [...document.querySelectorAll('[data-workflow-timeline-entry]')].map((node) => node.getAttribute('data-workflow-timeline-entry'));",
+      "    if (surface && topLevel === 'working' && currentState === 'artifact_forking' && !gate && timelineTitles.includes('Implementer turn completed') && timelineTitles.includes('Planner review started') && timelineTitles.includes('Planner review completed') && timelineTitles.includes('Review result detected')) {",
+      '      return;',
+      '    }',
+      '    await new Promise((resolve) => window.setTimeout(resolve, 150));',
+      '  }',
+      "  throw new Error('Workflow route did not reflect the accepted review boundary honestly.');",
+      '})()',
+    ].join(' '),
+  );
+}
+
+async function assertWorkflowRuntimeRoute(repoPath: string) {
   const goalPrompt = [
-    'Tighten the hub-and-spoke workflow runtime in the smallest reviewable slice.',
+    'Prove the hub-and-spoke workflow runtime on a tiny validation repository.',
     'Do not inspect files or run commands yet; wait for one clarifying user message before drafting the first prompt candidate.',
+    'The first worker step should be a trivial, immediately reviewable repo-root change.',
   ].join(' ');
   const runId = await createWorkflowRunFromBrowser({
-    repoPath: process.cwd(),
+    repoPath,
     goalPrompt,
   });
 
@@ -1017,8 +1104,12 @@ async function assertWorkflowRuntimeRoute() {
   await sendWorkflowPlanningMessageFromBrowser(
     [
       'Do not inspect files or run commands for this planning step.',
-      'Use one explicit first prompt candidate and emit exactly one <first_prompt_candidate>...</first_prompt_candidate> marker.',
-      'Keep it focused on the swarm gate-route mapping and workflow-runtime browser validation.',
+      'Emit exactly one <first_prompt_candidate>...</first_prompt_candidate> marker whose body is only this implementer task:',
+      `Create a file named ${workflowValidationNoteFile} at the repository root.`,
+      `Write exactly this single line into the file: ${workflowValidationNoteBody}`,
+      'Do not modify any other files.',
+      'Do not run tests or commands beyond the minimum needed to create the file.',
+      'When finished, the implementer should report that the file was created exactly as requested.',
     ].join(' '),
   );
 
@@ -1034,10 +1125,12 @@ async function assertWorkflowRuntimeRoute() {
 
   await approveWorkflowGateFromBrowser();
   await assertWorkflowImplementingSurface(runId);
+  await waitForWorkflowAcceptedReviewBoundary(runId);
 }
 
 await fs.mkdir(importedRoot, { recursive: true });
 await fs.mkdir(runtimeRoot, { recursive: true });
+const workflowValidationRepoPath = await createWorkflowValidationRepo();
 await runCommand('npx', ['agent-browser', 'install']);
 
 const canonicalBundle = JSON.parse(await fs.readFile(canonicalBundlePath, 'utf8')) as BundleLike;
@@ -1212,7 +1305,7 @@ try {
   );
   assertIncludes(apiResponse, 'cu_validation_rollup_checkpoint', 'canonical packet id should come from API');
   assertIncludes(apiResponse, 'cu_dynamic_tutorial_fixture', 'fixture packet id should come from API');
-  await assertWorkflowRuntimeRoute();
+  await assertWorkflowRuntimeRoute(workflowValidationRepoPath);
 
   detectPageErrors(await runBrowser(['errors'], true));
 } finally {

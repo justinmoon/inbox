@@ -191,6 +191,10 @@ function eventTitle(event: RunEventRecord) {
     planner_turn_failed: 'Planner turn failed',
     planner_marker_detected: 'Marker detected',
     planner_marker_not_found: 'Marker not found',
+    review_turn_started: 'Planner review started',
+    review_turn_completed: 'Planner review completed',
+    review_turn_failed: 'Planner review failed',
+    review_result_detected: 'Review result detected',
     gate_opened: 'Gate opened',
     gate_answered: 'Gate answered',
     gate_dismissed: 'Gate dismissed',
@@ -212,7 +216,7 @@ function eventEmphasis(event: RunEventRecord): SwarmTimelineEntry['emphasis'] {
   if (event.type.includes('turn_')) {
     return 'turn';
   }
-  if (event.type.includes('marker')) {
+  if (event.type.includes('marker') || event.type === 'review_result_detected') {
     return 'marker';
   }
   if (event.type.startsWith('gate_')) {

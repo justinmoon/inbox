@@ -602,6 +602,13 @@ export class WorkflowRunService {
       };
       await this.#sessions.saveSession(updatedSession);
 
+      this.#schedulePlanningTurnWatcher({
+        runId: run.id,
+        sessionId: updatedSession.id,
+        promptId: args.promptId,
+        turnId: turn.turnId,
+      });
+
       await this.#recordEvent({
         run,
         type: 'planner_turn_started',
@@ -618,13 +625,6 @@ export class WorkflowRunService {
           source: args.source,
           ...args.messageMetadata,
         }),
-      });
-
-      this.#schedulePlanningTurnWatcher({
-        runId: run.id,
-        sessionId: updatedSession.id,
-        promptId: args.promptId,
-        turnId: turn.turnId,
       });
 
       return updatedSession;
@@ -1179,6 +1179,12 @@ export class WorkflowRunService {
       };
       await this.#sessions.saveSession(updatedSession);
 
+      this.#scheduleImplementerTurnWatcher({
+        runId: args.run.id,
+        sessionId: updatedSession.id,
+        turnId: turn.turnId,
+      });
+
       await this.#recordEvent({
         run: args.run,
         type: 'implementer_turn_started',
@@ -1191,12 +1197,6 @@ export class WorkflowRunService {
           source_gate_id: args.sourceGate.id,
           prompt_candidate: promptCandidate,
         }),
-      });
-
-      this.#scheduleImplementerTurnWatcher({
-        runId: args.run.id,
-        sessionId: updatedSession.id,
-        turnId: turn.turnId,
       });
     } catch (error) {
       await this.#transitionRunToFailed({
@@ -1293,13 +1293,509 @@ export class WorkflowRunService {
     await this.#recordEvent({
       run,
       type: 'implementer_turn_completed',
-      summary: 'Implementer turn completed. Reviewer execution is not wired yet.',
+      summary:
+        run.current_state_id === 'fixup_implementing'
+          ? 'Implementer fixup turn completed.'
+          : 'Implementer turn completed.',
       state_id: run.current_state_id,
       session_id: updatedSession.id,
       thread_id: updatedSession.thread_id,
       turn_id: args.turnId,
       metadata: stringMetadata({ status: completion.status }),
     });
+
+    const definition = this.#loadDefinitionOrThrow(run.workflow_id);
+    const transition = findWorkflowTransition(definition, {
+      fromStateId: run.current_state_id,
+      event: 'implementer.completed',
+    });
+    if (!transition) {
+      return;
+    }
+
+    const transitionResult = await this.#transitionRun({
+      run,
+      transition,
+      sessionId: updatedSession.id,
+      threadId: updatedSession.thread_id,
+      turnId: args.turnId,
+      metadata: stringMetadata({ status: completion.status }),
+      gateMetadata: {},
+    });
+
+    if (transitionResult.nextState.id !== 'auto_review') {
+      return;
+    }
+
+    const implementerThread = await this.#codex.readThread({
+      threadId: updatedSession.thread_id,
+      includeTurns: true,
+    });
+
+    await this.#startReviewTurn({
+      run: transitionResult.run,
+      implementerSession: updatedSession,
+      implementerThread,
+      implementerTurnId: args.turnId,
+    });
+  }
+
+  async #startReviewTurn(args: {
+    run: WorkflowRunRecord;
+    implementerSession: AgentSessionRecord;
+    implementerThread: CodexThread;
+    implementerTurnId: string;
+  }) {
+    const definition = this.#loadDefinitionOrThrow(args.run.workflow_id);
+    const state = getWorkflowState(definition, 'auto_review');
+    const promptId = state?.prompt_ids[0] ?? null;
+    const prompt = promptId ? getWorkflowPrompt(definition, promptId) : null;
+    const session = await this.#loadPlanningSession(args.run.id);
+
+    if (!state || !promptId || !prompt || !session) {
+      await this.#transitionRunToFailed({
+        runId: args.run.id,
+        sessionId: session?.id ?? null,
+        threadId: session?.thread_id ?? null,
+        turnId: args.implementerTurnId,
+        eventType: 'review_startup_failed',
+        summary: 'Planner review could not start after implementer completion.',
+        error: new Error('Planner review state, prompt, or session is unavailable.'),
+        transitionEvent: 'review.abort',
+      });
+      return;
+    }
+
+    const reviewContext: Record<string, string | null> = {
+      approved_prompt_candidate: args.implementerSession.metadata.prompt_candidate ?? null,
+      implementer_output: latestAssistantTextForTurn(args.implementerThread, args.implementerTurnId),
+      implementer_workspace_path: args.implementerSession.cwd,
+      implementer_thread_id: args.implementerSession.thread_id,
+      implementer_turn_id: args.implementerTurnId,
+    };
+
+    try {
+      const preparedSession: AgentSessionRecord = {
+        ...session,
+        state_id: state.id,
+        status: 'active',
+        updated_at: this.#clock(),
+        metadata: {
+          ...session.metadata,
+          ...stringMetadata({
+            prompt_id: prompt.id,
+            last_reviewed_turn_id: args.implementerTurnId,
+            last_reviewed_thread_id: args.implementerSession.thread_id,
+          }),
+        },
+      };
+      await this.#sessions.saveSession(preparedSession);
+
+      await this.#codex.resumeThread({
+        threadId: preparedSession.thread_id,
+        ...this.#codexExecution,
+        persistExtendedHistory: true,
+      });
+
+      const turn = await this.#codex.startTurn({
+        threadId: preparedSession.thread_id,
+        text: prompt.render({
+          run: args.run,
+          runtime_context: reviewContext,
+        }),
+        cwd: preparedSession.cwd,
+        ...this.#codexExecution,
+      });
+
+      const updatedSession: AgentSessionRecord = {
+        ...preparedSession,
+        active_turn_id: turn.turnId,
+        active_turn_started_at: this.#clock(),
+        updated_at: this.#clock(),
+      };
+      await this.#sessions.saveSession(updatedSession);
+
+      this.#scheduleReviewTurnWatcher({
+        runId: args.run.id,
+        sessionId: updatedSession.id,
+        promptId: prompt.id,
+        turnId: turn.turnId,
+      });
+
+      await this.#recordEvent({
+        run: args.run,
+        type: 'review_turn_started',
+        summary: 'Planner review turn started after implementer completion.',
+        state_id: args.run.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: turn.turnId,
+        metadata: stringMetadata({
+          prompt_id: prompt.id,
+          reviewed_turn_id: args.implementerTurnId,
+          implementer_thread_id: args.implementerSession.thread_id,
+        }),
+      });
+    } catch (error) {
+      await this.#transitionRunToFailed({
+        runId: args.run.id,
+        sessionId: session.id,
+        threadId: session.thread_id,
+        turnId: args.implementerTurnId,
+        eventType: 'review_startup_failed',
+        summary: 'Planner review failed to start after implementer completion.',
+        error,
+        transitionEvent: 'review.abort',
+      });
+    }
+  }
+
+  #scheduleReviewTurnWatcher(args: {
+    runId: string;
+    sessionId: string;
+    promptId: string;
+    turnId: string;
+  }) {
+    const key = `${args.sessionId}:${args.turnId}`;
+    if (this.#turnTasks.has(key)) {
+      return;
+    }
+
+    const task = this.#waitForReviewTurnCompletion(args)
+      .catch(async (error) => {
+        await this.#transitionRunToFailed({
+          runId: args.runId,
+          sessionId: args.sessionId,
+          turnId: args.turnId,
+          eventType: 'review_turn_failed',
+          summary: 'Planner review execution failed after starting.',
+          error,
+          transitionEvent: 'review.abort',
+        });
+      })
+      .finally(() => {
+        this.#turnTasks.delete(key);
+      });
+
+    this.#turnTasks.set(key, task);
+  }
+
+  async #waitForReviewTurnCompletion(args: {
+    runId: string;
+    sessionId: string;
+    promptId: string;
+    turnId: string;
+  }) {
+    const completion = await this.#codex.waitForTurnCompletion({
+      threadId: (await this.#requireSession(args.sessionId)).thread_id,
+      turnId: args.turnId,
+    });
+
+    const session = await this.#requireSession(args.sessionId);
+    const run = await this.#requireRun(args.runId);
+    const completedAt = this.#clock();
+    const updatedSession: AgentSessionRecord = {
+      ...session,
+      active_turn_id: session.active_turn_id === args.turnId ? null : session.active_turn_id,
+      active_turn_started_at: session.active_turn_id === args.turnId ? null : session.active_turn_started_at,
+      latest_turn_id: args.turnId,
+      latest_turn_completed_at: completedAt,
+      last_turn_status: normalizeTurnStatus(completion.status),
+      status: completion.status === 'completed' ? 'active' : 'failed',
+      updated_at: completedAt,
+    };
+    await this.#sessions.saveSession(updatedSession);
+
+    if (completion.status !== 'completed') {
+      await this.#recordEvent({
+        run,
+        type: 'review_turn_failed',
+        summary: `Planner review finished with status "${completion.status}".`,
+        state_id: run.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: args.turnId,
+        metadata: stringMetadata({ status: completion.status }),
+      });
+
+      await this.#transitionRunToFailed({
+        runId: run.id,
+        sessionId: updatedSession.id,
+        threadId: updatedSession.thread_id,
+        turnId: args.turnId,
+        eventType: 'review_runtime_failed',
+        summary: `Planner review completed with status "${completion.status}".`,
+        error: new Error(`Review turn ${args.turnId} finished with status "${completion.status}".`),
+        transitionEvent: 'review.abort',
+      });
+      return;
+    }
+
+    await this.#recordEvent({
+      run,
+      type: 'review_turn_completed',
+      summary: 'Planner review turn completed.',
+      state_id: run.current_state_id,
+      session_id: updatedSession.id,
+      thread_id: updatedSession.thread_id,
+      turn_id: args.turnId,
+      metadata: stringMetadata({ status: completion.status }),
+    });
+
+    const thread = await this.#codex.readThread({
+      threadId: updatedSession.thread_id,
+      includeTurns: true,
+    });
+
+    await this.#applyReviewTurnOutcome({
+      runId: run.id,
+      sessionId: updatedSession.id,
+      definitionId: run.workflow_id,
+      promptId: args.promptId,
+      turnId: args.turnId,
+      thread,
+    });
+  }
+
+  async #applyReviewTurnOutcome(args: {
+    runId: string;
+    sessionId: string;
+    definitionId: string;
+    promptId: string;
+    turnId: string;
+    thread: CodexThread;
+  }) {
+    const run = await this.#requireRun(args.runId);
+    const session = await this.#requireSession(args.sessionId);
+    const definition = this.#loadDefinitionOrThrow(args.definitionId);
+    const prompt = getWorkflowPrompt(definition, args.promptId);
+    if (!prompt) {
+      throw new Error(`Prompt "${args.promptId}" was not found in workflow "${definition.id}".`);
+    }
+
+    const latestAssistantText = latestAssistantTextForTurn(args.thread, args.turnId);
+    if (!latestAssistantText) {
+      await this.#transitionRunToFailed({
+        runId: run.id,
+        sessionId: session.id,
+        threadId: session.thread_id,
+        turnId: args.turnId,
+        eventType: 'review_output_missing',
+        summary: 'Planner review completed without an assistant verdict.',
+        error: new Error('Planner review did not emit an assistant message.'),
+        transitionEvent: 'review.abort',
+      });
+      return;
+    }
+
+    for (const parserHookId of prompt.parser_hook_ids) {
+      const parserHook = getWorkflowParserHook(definition, parserHookId);
+      if (!parserHook) {
+        continue;
+      }
+
+      const parserResult = parserHook.parse(latestAssistantText);
+      if (!isObject(parserResult) || typeof parserResult.status !== 'string') {
+        continue;
+      }
+
+      const reviewStatus = parserResult.status;
+      const reviewBody = typeof parserResult.body === 'string' ? parserResult.body : null;
+      const transitionEvent =
+        reviewStatus === 'accepted'
+          ? 'review.accepted'
+          : reviewStatus === 'fixup_required'
+            ? 'review.fixup_required'
+            : reviewStatus === 'replan_required'
+              ? 'review.replan_required'
+              : null;
+
+      if (!transitionEvent) {
+        continue;
+      }
+
+      await this.#recordEvent({
+        run,
+        type: 'review_result_detected',
+        summary: `Planner review emitted the "${reviewStatus}" verdict.`,
+        state_id: run.current_state_id,
+        session_id: session.id,
+        thread_id: session.thread_id,
+        turn_id: args.turnId,
+        metadata: stringMetadata({
+          parser_hook_id: parserHook.id,
+          review_status: reviewStatus,
+          review_body: reviewBody,
+        }),
+      });
+
+      const transition = findWorkflowTransition(definition, {
+        fromStateId: run.current_state_id,
+        event: transitionEvent,
+      });
+      if (!transition) {
+        throw new Error(
+          `Workflow "${definition.id}" has no transition for event "${transitionEvent}" from state "${run.current_state_id}".`,
+        );
+      }
+
+      if (reviewStatus === 'accepted') {
+        await this.#sessions.saveSession({
+          ...session,
+          state_id: transition.to,
+          updated_at: this.#clock(),
+        });
+      }
+
+      if (reviewStatus === 'replan_required') {
+        await this.#sessions.saveSession({
+          ...session,
+          state_id: transition.to,
+          updated_at: this.#clock(),
+          metadata: {
+            ...session.metadata,
+            ...stringMetadata({
+              prompt_id: 'planner_conversation',
+              review_replan_body: reviewBody,
+            }),
+          },
+        });
+      }
+
+      const transitionResult = await this.#transitionRun({
+        run,
+        transition,
+        sessionId: session.id,
+        threadId: session.thread_id,
+        turnId: args.turnId,
+        metadata: stringMetadata({
+          parser_hook_id: parserHook.id,
+          review_status: reviewStatus,
+          review_body: reviewBody,
+        }),
+        gateMetadata: {},
+      });
+
+      if (reviewStatus === 'accepted' || reviewStatus === 'replan_required') {
+        return;
+      }
+
+      await this.#startFixupImplementerTurn({
+        run: transitionResult.run,
+        promptCandidate: reviewBody,
+        reviewSession: session,
+        reviewTurnId: args.turnId,
+      });
+      return;
+    }
+
+    await this.#transitionRunToFailed({
+      runId: run.id,
+      sessionId: session.id,
+      threadId: session.thread_id,
+      turnId: args.turnId,
+      eventType: 'review_marker_not_found',
+      summary: 'Planner review completed without an explicit verdict marker.',
+      error: new Error('Planner review did not emit an explicit verdict marker.'),
+      transitionEvent: 'review.abort',
+    });
+  }
+
+  async #startFixupImplementerTurn(args: {
+    run: WorkflowRunRecord;
+    promptCandidate: string | null;
+    reviewSession: AgentSessionRecord;
+    reviewTurnId: string;
+  }) {
+    const promptCandidate = args.promptCandidate?.trim() ?? null;
+    const session = await this.#loadImplementerSession(args.run.id);
+    if (!promptCandidate || !session) {
+      await this.#transitionRunToFailed({
+        runId: args.run.id,
+        sessionId: args.reviewSession.id,
+        threadId: args.reviewSession.thread_id,
+        turnId: args.reviewTurnId,
+        eventType: 'implementer_startup_failed',
+        summary: 'Implementer fixup could not start after planner review.',
+        error: new Error('Fixup prompt or implementer session is unavailable.'),
+        transitionEvent: 'implementer.failed',
+      });
+      return;
+    }
+
+    try {
+      await this.#codex.resumeThread({
+        threadId: session.thread_id,
+        ...this.#codexExecution,
+        persistExtendedHistory: true,
+      });
+
+      const preparedSession: AgentSessionRecord = {
+        ...session,
+        state_id: args.run.current_state_id,
+        status: 'active',
+        updated_at: this.#clock(),
+        metadata: {
+          ...session.metadata,
+          ...stringMetadata({
+            prompt_candidate: promptCandidate,
+            fixup_review_turn_id: args.reviewTurnId,
+          }),
+        },
+      };
+      await this.#sessions.saveSession(preparedSession);
+
+      const turn = await this.#codex.startTurn({
+        threadId: preparedSession.thread_id,
+        text: this.#buildImplementerTurnText({
+          workflowId: args.run.workflow_id,
+          promptCandidate,
+          goalPrompt: args.run.goal_prompt,
+          promptLabel: 'Fixup prompt',
+        }),
+        cwd: preparedSession.cwd,
+        ...this.#codexExecution,
+      });
+
+      const updatedSession: AgentSessionRecord = {
+        ...preparedSession,
+        active_turn_id: turn.turnId,
+        active_turn_started_at: this.#clock(),
+        updated_at: this.#clock(),
+      };
+      await this.#sessions.saveSession(updatedSession);
+
+      this.#scheduleImplementerTurnWatcher({
+        runId: args.run.id,
+        sessionId: updatedSession.id,
+        turnId: turn.turnId,
+      });
+
+      await this.#recordEvent({
+        run: args.run,
+        type: 'implementer_turn_started',
+        summary: 'Implementer fixup turn started from planner review.',
+        state_id: args.run.current_state_id,
+        session_id: updatedSession.id,
+        thread_id: updatedSession.thread_id,
+        turn_id: turn.turnId,
+        metadata: stringMetadata({
+          prompt_candidate: promptCandidate,
+          review_turn_id: args.reviewTurnId,
+        }),
+      });
+    } catch (error) {
+      await this.#transitionRunToFailed({
+        runId: args.run.id,
+        sessionId: session.id,
+        threadId: session.thread_id,
+        turnId: args.reviewTurnId,
+        eventType: 'implementer_startup_failed',
+        summary: 'Implementer fixup failed to start after planner review.',
+        error,
+        transitionEvent: 'implementer.failed',
+      });
+    }
   }
 
   async #createGatesForState(args: {
@@ -1345,6 +1841,11 @@ export class WorkflowRunService {
       sessions.find((session) => session.kind === 'planning_conversation' && session.status === 'active') ??
       null
     );
+  }
+
+  async #loadImplementerSession(runId: string) {
+    const sessions = await this.#sessions.listByRun(runId);
+    return sessions.findLast((session) => session.actor === 'implementer') ?? null;
   }
 
   async #transitionRunToFailed(args: {
@@ -1500,6 +2001,7 @@ export class WorkflowRunService {
     workflowId: string;
     promptCandidate: string;
     goalPrompt: string;
+    promptLabel?: string;
   }) {
     const swarm = this.#swarms.getDefinition(args.workflowId);
     const implementer = swarm?.agents.find((agent) => agent.id === 'implementer') ?? null;
@@ -1517,7 +2019,7 @@ export class WorkflowRunService {
       'Workflow goal:',
       args.goalPrompt,
       '',
-      'Approved prompt candidate:',
+      `${args.promptLabel ?? 'Approved prompt candidate'}:`,
       args.promptCandidate,
     ].join('\n');
   }

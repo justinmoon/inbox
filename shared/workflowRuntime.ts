@@ -246,6 +246,9 @@ export type SwarmAgentDefinitionView = {
   session_kinds: string[];
   role_prompt: string;
   operating_guidelines: string[];
+  review_role_prompt: string | null;
+  review_guidelines: string[];
+  expected_marker_ids: string[];
   target_artifact_kind_ids: string[];
   target_gate_rule_ids: string[];
 };

@@ -99,6 +99,15 @@ export function validateSwarmDefinition(definition: SwarmDefinition): SwarmDefin
         agent_id: agent.id,
       });
     }
+
+    if (agent.review_guidelines.length > 0 && !(agent.review_role_prompt ?? '').trim()) {
+      issues.push({
+        level: 'error',
+        code: 'missing_agent_review_role_prompt',
+        message: `Agent "${agent.id}" is missing its review role prompt text.`,
+        agent_id: agent.id,
+      });
+    }
   }
 
   if (hubAgents.length === 0) {

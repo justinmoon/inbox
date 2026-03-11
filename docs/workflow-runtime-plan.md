@@ -756,3 +756,93 @@ The swarm layer is currently descriptive plus prompt/policy-bearing. It is not y
 - the swarm overview updating to show the implementer route/status
 
 This keeps the runtime route from drifting into an unvalidated developer-only path.
+
+## Swarm Review Policy
+
+The swarm definition now carries a small first-class review policy for the planner hub:
+
+- `SwarmAgentDefinitionView`
+  - `review_role_prompt`
+  - `review_guidelines`
+  - `expected_marker_ids`
+
+For `plan-implement-review`, the planner hub policy now explicitly owns:
+
+- prompt-proposal behavior
+- review behavior after implementer execution
+- the expected review markers:
+  - `review_accepted`
+  - `review_fixup_required`
+  - `review_replan_required`
+
+The workflow runtime still owns execution truth, but the planner/reviewer role text and review guidance now come from the swarm definition instead of being duplicated as backend-only strings.
+
+## Executable Hub And Worker Loop
+
+The runtime now executes the first real hub-and-spoke review loop:
+
+- `planning_conversation`
+  - live planner conversation with explicit first-prompt marker parsing
+- `first_prompt_approval`
+  - explicit user gate with approve/revise handling
+- `implementing`
+  - implementer workspace/session/turn launch from the approved prompt candidate
+- `auto_review`
+  - planner/reviewer session reuse
+  - real review turn launched after implementer completion
+  - explicit verdict parsing from deterministic review markers
+- `fixup_implementing`
+  - implementer relaunch from the planner’s fixup prompt
+- `artifact_forking`
+  - accepted-review boundary only for now
+
+Current review-loop behavior:
+
+- implementer completion records `implementer_turn_completed`
+- runtime transitions into `auto_review`
+- planner review records:
+  - `review_turn_started`
+  - `review_turn_completed`
+  - `review_result_detected`
+- explicit review markers drive the next path:
+  - `accepted`
+    - transition to `artifact_forking`
+  - `fixup_required`
+    - transition to `fixup_implementing`
+    - relaunch implementer with the fixup prompt
+  - `replan_required`
+    - transition back to `planning_conversation`
+    - keep planner thread continuity
+    - persist the replanning feedback on the planner session
+
+## Browser Validation Coverage
+
+The browser validator now exercises one real hub-and-spoke review path end to end on a tiny dedicated git repo:
+
+- `/workflow-runs`
+- create a workflow run from the UI
+- live planning conversation
+- first prompt approval
+- implementer launch
+- implementer completion
+- planner auto-review start
+- accepted-review transition into `artifact_forking`
+- swarm overview and timeline update at the accepted-review boundary
+
+The validator also checks the actual implementer workspace output by reading the expected file from the implementer workspace after the accepted review boundary is reached.
+
+## Remaining Gaps Before Tutorial / Next-Prompt Workers
+
+This slice still intentionally stops before post-review worker fanout.
+
+Still missing:
+
+- tutorial generation execution
+- next-prompt artifact generation
+- later user gates after the first prompt approval
+- a reviewer path beyond the planner hub
+- broader worker fanout such as PR or tutorial spokes
+- restart recovery for in-flight implementer/review turns
+- any generic swarm scheduler or peer-mesh routing model
+
+The detailed workflow file still remains the execution truth. The swarm layer now owns more agent policy, but it is still not the scheduler or full runtime engine.

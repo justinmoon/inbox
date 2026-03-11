@@ -8,11 +8,15 @@ import type {
   CodexUserInput,
 } from '../../shared/api.ts';
 
-function humanizeToken(value: string): string {
+function humanizeToken(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return 'Unknown';
+  }
+
   return value.replaceAll(/([a-z0-9])([A-Z])/g, '$1 $2').replaceAll('_', ' ');
 }
 
-function titleCase(value: string): string {
+function titleCase(value: unknown): string {
   return humanizeToken(value).replace(/\b\w/g, (char) => char.toUpperCase());
 }
 

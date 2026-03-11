@@ -102,6 +102,30 @@ function renderAgentPolicyLines(agent: { role_prompt: string; operating_guidelin
   ];
 }
 
+function renderReviewPolicyLines(agent: {
+  role_prompt: string;
+  review_role_prompt: string | null;
+  review_guidelines: string[];
+  expected_marker_ids: string[];
+}) {
+  return [
+    agent.review_role_prompt ?? agent.role_prompt,
+    '',
+    'Review guidelines:',
+    ...agent.review_guidelines.map((guideline) => `- ${guideline}`),
+    '',
+    `Expected review markers: ${agent.expected_marker_ids.filter((markerId) => markerId.startsWith('review_')).join(', ')}`,
+  ];
+}
+
+function runtimeContextValue(
+  runtimeContext: Record<string, string | null> | undefined,
+  key: string,
+  fallback: string,
+) {
+  return runtimeContext?.[key] ?? fallback;
+}
+
 export const planImplementReviewWorkflow = defineWorkflow({
   id: 'plan-implement-review',
   title: 'Plan / Implement / Review',
@@ -446,6 +470,7 @@ export const planImplementReviewWorkflow = defineWorkflow({
           '',
           `Current swarm target artifact: ${promptCandidateArtifact.title}.`,
           `Current user gate target: ${promptCandidateGateRule.title}.`,
+          `Expected planning marker: ${plannerAgent.expected_marker_ids.find((markerId) => markerId === 'first_prompt_candidate') ?? 'first_prompt_candidate'}.`,
           '',
           'Stay in discussion with the user until the first implementer step is scoped tightly enough to execute.',
           'When the plan is not ready yet, keep the conversation focused and do not emit any workflow markers.',
@@ -467,17 +492,27 @@ export const planImplementReviewWorkflow = defineWorkflow({
       used_in_state_ids: ['auto_review'],
       output_marker_ids: ['review_accepted', 'review_fixup_required', 'review_replan_required'],
       parser_hook_ids: ['parse_review_verdict'],
-      render({ run }) {
+      render({ run, runtime_context }) {
         return [
-          ...renderAgentPolicyLines(plannerAgent),
-          '',
-          'You are reviewing the implementer output for this workflow run.',
+          ...renderReviewPolicyLines(plannerAgent),
           '',
           'Goal:',
           run.goal_prompt,
           '',
           'Repository context:',
           describeRepo(run.repo.repo_id, run.repo.repo_path),
+          '',
+          'Approved prompt candidate:',
+          runtimeContextValue(runtime_context, 'approved_prompt_candidate', 'Unavailable.'),
+          '',
+          'Implementer workspace:',
+          runtimeContextValue(runtime_context, 'implementer_workspace_path', 'Unavailable.'),
+          '',
+          'Implementer thread:',
+          runtimeContextValue(runtime_context, 'implementer_thread_id', 'Unavailable.'),
+          '',
+          'Implementer output:',
+          runtimeContextValue(runtime_context, 'implementer_output', 'Implementer output unavailable.'),
           '',
           'Pick exactly one of these deterministic verdict markers:',
           '<review_result status="accepted" />',

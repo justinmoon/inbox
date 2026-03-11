@@ -25,6 +25,8 @@ test('plan-implement-review swarm validates cleanly and exposes machine-readable
   assert.ok(detail);
   assert.equal(detail?.agents[0]?.id, 'planner');
   assert.equal(detail?.agents[0]?.role_prompt.includes('planner/reviewer hub'), true);
+  assert.equal(detail?.agents[0]?.review_role_prompt?.includes('evaluating implementer output'), true);
+  assert.equal(detail?.agents[0]?.expected_marker_ids.includes('review_fixup_required'), true);
   assert.equal(detail?.agents[0]?.target_gate_rule_ids[0], 'prompt_candidate_approval');
   assert.equal(detail?.allowed_routes[0]?.id, 'planner_to_implementer');
   assert.equal(detail?.gate_rules[0]?.artifact_kind_id, 'prompt_candidate');
@@ -48,6 +50,9 @@ test('swarm validation catches unknown route agents and bad gate-route mappings'
         session_kinds: ['planning_conversation'],
         role_prompt: '',
         operating_guidelines: [],
+        review_role_prompt: '',
+        review_guidelines: ['Emit one review marker.'],
+        expected_marker_ids: [],
         target_artifact_kind_ids: [],
         target_gate_rule_ids: [],
       },
@@ -105,6 +110,12 @@ test('swarm validation catches unknown route agents and bad gate-route mappings'
   assert.equal(
     validation.issues.some(
       (issue) => issue.code === 'missing_agent_role_prompt' && issue.agent_id === 'planner',
+    ),
+    true,
+  );
+  assert.equal(
+    validation.issues.some(
+      (issue) => issue.code === 'missing_agent_review_role_prompt' && issue.agent_id === 'planner',
     ),
     true,
   );

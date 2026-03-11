@@ -14,6 +14,7 @@ import type {
 
 export type WorkflowPromptContext = {
   run: WorkflowRunRecord;
+  runtime_context?: Record<string, string | null>;
 };
 
 export type WorkflowPromptTemplate = WorkflowDefinitionPromptView & {

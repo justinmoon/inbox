@@ -414,6 +414,23 @@ async function moveRunToFirstPromptApproval(harness: Awaited<ReturnType<typeof c
   };
 }
 
+async function moveRunToImplementing(harness: Awaited<ReturnType<typeof createHarness>>) {
+  const { created, gate } = await moveRunToFirstPromptApproval(harness);
+  const detail = await harness.service.answerGate({
+    runId: created.run.id,
+    gateId: gate.id,
+    optionId: 'approve',
+  });
+  const implementerSession = detail.sessions.find((session) => session.session.kind === 'implementing');
+  assert.ok(implementerSession, 'expected an implementer session after approval');
+
+  return {
+    created,
+    detail,
+    implementerSession,
+  };
+}
+
 test('run creation returns before planner turn completion', async () => {
   const harness = await createHarness([{ completion: 'manual' }]);
 
@@ -759,6 +776,235 @@ test('implementer turn prompt consumes swarm policy text', async () => {
     assert.match(implementerPrompt, /Workflow goal:/);
     assert.match(implementerPrompt, /Approved prompt candidate:/);
     assert.match(implementerPrompt, /Implement the runtime persistence and initial planner run path\./);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('implementer completion triggers planner review', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+
+    const reviewStarted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    );
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await reviewStarted;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const plannerSession = detail?.sessions.find((session) => session.session.kind === 'planning_conversation');
+    assert.equal(detail?.run.current_state_id, 'auto_review');
+    assert.equal(detail?.run.current_state_family, 'background');
+    assert.equal(plannerSession?.session.active_turn_id, 'turn_3');
+    assert.equal(detail?.events.some((event) => event.type === 'implementer_turn_completed'), true);
+    assert.equal(detail?.events.some((event) => event.type === 'review_turn_started'), true);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('review prompt assembly consumes swarm review policy text', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+
+    const reviewStarted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    );
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await reviewStarted;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const plannerSession = detail?.sessions.find((session) => session.session.kind === 'planning_conversation');
+    const reviewPrompt = firstTurnUserMessageText(plannerSession?.thread, 'turn_3');
+
+    assert.match(reviewPrompt, /evaluating implementer output for a hub-and-spoke swarm run/i);
+    assert.match(reviewPrompt, /Review guidelines:/);
+    assert.match(reviewPrompt, /Expected review markers: review_accepted, review_fixup_required, review_replan_required/);
+    assert.match(reviewPrompt, /Approved prompt candidate:/);
+    assert.match(reviewPrompt, /Implementer output:/);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('accepted review transitions to the accepted-review boundary', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+
+    const reviewStarted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    );
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await reviewStarted;
+
+    const acceptedTransition = waitForUpdate(
+      harness.service,
+      (update) =>
+        update.run_id === created.run.id &&
+        update.event.type === 'state_transition' &&
+        update.event.to_state_id === 'artifact_forking',
+    );
+    harness.codex.completeTurn('turn_3', {
+      assistantText: '<review_result status="accepted" />',
+    });
+    await acceptedTransition;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    assert.equal(detail?.run.current_state_id, 'artifact_forking');
+    assert.equal(detail?.run.current_state_family, 'background');
+    assert.equal(detail?.events.some((event) => event.type === 'review_result_detected'), true);
+    assert.equal(
+      detail?.swarm?.timeline.some((entry) => entry.title === 'Review result detected'),
+      true,
+    );
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('fixup_required launches implementer again with the fixup prompt', async () => {
+  const harness = await createHarness([
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+    { completion: 'manual' },
+  ]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+
+    const reviewStarted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    );
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await reviewStarted;
+
+    const fixupStarted = waitForUpdate(
+      harness.service,
+      (update) =>
+        update.run_id === created.run.id &&
+        update.event.type === 'implementer_turn_started' &&
+        update.event.state_id === 'fixup_implementing',
+    );
+    harness.codex.completeTurn('turn_3', {
+      assistantText:
+        '<review_result status="fixup_required">Add one more verification line to the runtime review note.</review_result>',
+    });
+    await fixupStarted;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const implementerSession = detail?.sessions.find((session) => session.session.kind === 'implementing');
+    const fixupPrompt = firstTurnUserMessageText(implementerSession?.thread, 'turn_4');
+
+    assert.equal(detail?.run.current_state_id, 'fixup_implementing');
+    assert.equal(implementerSession?.session.active_turn_id, 'turn_4');
+    assert.match(fixupPrompt, /Fixup prompt:/);
+    assert.match(fixupPrompt, /Add one more verification line to the runtime review note\./);
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('replan_required returns to planning_conversation', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+
+    const reviewStarted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    );
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await reviewStarted;
+
+    const replanning = waitForUpdate(
+      harness.service,
+      (update) =>
+        update.run_id === created.run.id &&
+        update.event.type === 'state_transition' &&
+        update.event.to_state_id === 'planning_conversation',
+    );
+    harness.codex.completeTurn('turn_3', {
+      assistantText:
+        '<review_result status="replan_required">Return to planning so the user can redirect the task.</review_result>',
+    });
+    await replanning;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const plannerSession = detail?.sessions.find((session) => session.session.kind === 'planning_conversation');
+
+    assert.equal(detail?.run.current_state_id, 'planning_conversation');
+    assert.equal(detail?.run.current_state_family, 'conversation');
+    assert.equal(plannerSession?.session.active_turn_id, null);
+    assert.equal(plannerSession?.session.state_id, 'planning_conversation');
+    assert.equal(plannerSession?.session.metadata.prompt_id, 'planner_conversation');
+  } finally {
+    await fs.rm(harness.rootDir, { recursive: true, force: true });
+  }
+});
+
+test('swarm timeline reflects the review loop honestly', async () => {
+  const harness = await createHarness([{ completion: 'manual' }, { completion: 'manual' }, { completion: 'manual' }]);
+
+  try {
+    const { created } = await moveRunToImplementing(harness);
+
+    const reviewStarted = waitForUpdate(
+      harness.service,
+      (update) => update.run_id === created.run.id && update.event.type === 'review_turn_started',
+    );
+    harness.codex.completeTurn('turn_2', {
+      assistantText: 'Implemented the requested runtime review note.',
+    });
+    await reviewStarted;
+
+    const acceptedTransition = waitForUpdate(
+      harness.service,
+      (update) =>
+        update.run_id === created.run.id &&
+        update.event.type === 'state_transition' &&
+        update.event.to_state_id === 'artifact_forking',
+    );
+    harness.codex.completeTurn('turn_3', {
+      assistantText: '<review_result status="accepted" />',
+    });
+    await acceptedTransition;
+
+    const detail = await harness.service.readRunDetail(created.run.id);
+    const timelineTitles = detail?.swarm?.timeline.map((entry) => entry.title) ?? [];
+    assert.equal(timelineTitles.includes('Implementer turn completed'), true);
+    assert.equal(timelineTitles.includes('Planner review started'), true);
+    assert.equal(timelineTitles.includes('Planner review completed'), true);
+    assert.equal(timelineTitles.includes('Review result detected'), true);
+    assert.equal(
+      timelineTitles.indexOf('Implementer turn completed') < timelineTitles.indexOf('Planner review started'),
+      true,
+    );
+    assert.equal(
+      timelineTitles.indexOf('Planner review started') < timelineTitles.indexOf('Review result detected'),
+      true,
+    );
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }

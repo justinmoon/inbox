@@ -31,7 +31,11 @@ export const reviewVerdictMeta: Record<
   blocked: { label: 'Blocked', tone: 'amber' },
 };
 
-function humanizeToken(value: string): string {
+function humanizeToken(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return 'Unknown';
+  }
+
   return value.replaceAll('_', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
