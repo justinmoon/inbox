@@ -245,9 +245,23 @@ function buildTimeline(
   input: WorkflowRunSwarmInput,
   sessionAgentIds: Map<string, string>,
 ): SwarmTimelineEntry[] {
-  return input.events.map((event) => ({
+  return [...input.events]
+    .sort((a, b) => {
+      if (a.sequence !== b.sequence) {
+        return a.sequence - b.sequence;
+      }
+
+      const timestampOrder = a.created_at.localeCompare(b.created_at);
+      if (timestampOrder !== 0) {
+        return timestampOrder;
+      }
+
+      return a.id.localeCompare(b.id);
+    })
+    .map((event) => ({
     id: `timeline_${event.id}`,
     event_id: event.id,
+    event_sequence: event.sequence,
     timestamp: event.created_at,
     emphasis: eventEmphasis(event),
     title: eventTitle(event),

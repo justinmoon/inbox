@@ -1264,6 +1264,25 @@ test('swarm timeline reflects the artifact worker lifecycle honestly', async () 
     ]);
     await harness.service.waitForIdle();
     const timelineTitles = detail?.swarm?.timeline.map((entry) => entry.title) ?? [];
+    const artifactPhaseEvents =
+      detail?.events.filter(
+        (event) =>
+          event.type === 'tutorial_worker_session_started' ||
+          event.type === 'tutorial_worker_turn_started' ||
+          event.type === 'tutorial_worker_turn_completed' ||
+          event.type === 'tutorial_artifact_persisted' ||
+          event.type === 'next_prompt_worker_session_started' ||
+          event.type === 'next_prompt_worker_turn_started' ||
+          event.type === 'next_prompt_worker_turn_completed' ||
+          event.type === 'next_prompt_artifact_persisted' ||
+          (event.type === 'state_transition' && event.to_state_id === 'step_approval') ||
+          (event.type === 'gate_opened' && event.metadata.definition_gate_id === 'step_approval_gate'),
+      ) ?? [];
+    const artifactTimeline =
+      detail?.swarm?.timeline.filter((entry) =>
+        artifactPhaseEvents.some((event) => event.id === entry.event_id),
+      ) ?? [];
+
     assert.equal(timelineTitles.includes('Tutorial worker session started'), true);
     assert.equal(timelineTitles.includes('Tutorial worker turn started'), true);
     assert.equal(timelineTitles.includes('Tutorial artifact persisted'), true);
@@ -1285,6 +1304,16 @@ test('swarm timeline reflects the artifact worker lifecycle honestly', async () 
       timelineTitles.indexOf('Next prompt artifact persisted') < timelineTitles.lastIndexOf('Gate opened'),
       true,
     );
+    assert.deepEqual(
+      artifactPhaseEvents.map((event) => event.sequence),
+      [...artifactPhaseEvents.map((event) => event.sequence)].sort((a, b) => a - b),
+    );
+    assert.equal(new Set(artifactPhaseEvents.map((event) => event.sequence)).size, artifactPhaseEvents.length);
+    assert.deepEqual(
+      artifactTimeline.map((entry) => entry.event_sequence),
+      artifactPhaseEvents.map((event) => event.sequence),
+    );
+    assert.equal(artifactTimeline.at(-1)?.title, 'Gate opened');
   } finally {
     await fs.rm(harness.rootDir, { recursive: true, force: true });
   }

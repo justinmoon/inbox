@@ -2593,6 +2593,7 @@ export class WorkflowRunService {
       id: createId('event', this.#idGenerator),
       run_id: args.run.id,
       workflow_id: args.run.workflow_id,
+      sequence: 0,
       type: args.type,
       summary: args.summary,
       state_id: args.state_id ?? null,
@@ -2606,11 +2607,11 @@ export class WorkflowRunService {
       tags: ['workflow-runtime'],
       metadata: args.metadata,
     };
-    await this.#events.saveEvent(event);
+    const persistedEvent = await this.#events.saveEvent(event);
 
     const update: WorkflowRunUpdate = {
-      run_id: event.run_id,
-      event,
+      run_id: persistedEvent.run_id,
+      event: persistedEvent,
     };
     for (const listener of this.#listeners) {
       try {
@@ -2620,7 +2621,7 @@ export class WorkflowRunService {
       }
     }
 
-    return event;
+    return persistedEvent;
   }
 
   #buildImplementerTurnText(args: {

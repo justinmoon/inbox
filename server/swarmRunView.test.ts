@@ -124,6 +124,7 @@ function createEvent(type: string, summary: string, overrides: Partial<RunEventR
     id: `event_${type}`,
     run_id: 'run_1',
     workflow_id: 'plan-implement-review',
+    sequence: 1,
     type,
     summary,
     state_id: 'planning_conversation',
@@ -197,14 +198,17 @@ test('swarm view derives current gate, agent status, and timeline from runtime r
     open_gates: [createGate()],
     events: [
       createEvent('agent_session_started', 'Planner session started.', {
+        sequence: 1,
         session_id: 'session_planner',
       }),
       createEvent('planner_marker_detected', 'Planner emitted a prompt candidate.', {
+        sequence: 2,
         session_id: 'session_planner',
         turn_id: 'turn_1',
         created_at: '2026-03-10T00:01:00.000Z',
       }),
       createEvent('gate_opened', 'Gate opened for user approval.', {
+        sequence: 3,
         created_at: '2026-03-10T00:02:00.000Z',
         metadata: {
           definition_gate_id: 'first_prompt_gate',
@@ -224,6 +228,10 @@ test('swarm view derives current gate, agent status, and timeline from runtime r
   assert.deepEqual(
     swarm?.timeline.map((entry) => entry.title),
     ['Agent session started', 'Marker detected', 'Gate opened'],
+  );
+  assert.deepEqual(
+    swarm?.timeline.map((entry) => entry.event_sequence),
+    [1, 2, 3],
   );
   assert.equal(swarm?.graph_mermaid.includes('approve via Planner delegates implementation'), true);
 });
@@ -271,26 +279,32 @@ test('swarm view derives artifact-worker timeline and step gate routing from run
     ],
     events: [
       createEvent('review_result_detected', 'Review accepted the step.', {
+        sequence: 1,
         created_at: '2026-03-10T00:02:00.000Z',
         session_id: 'session_planner',
       }),
       createEvent('tutorial_worker_session_started', 'Tutorial worker session started.', {
+        sequence: 2,
         created_at: '2026-03-10T00:03:00.000Z',
         session_id: 'session_tutorial',
       }),
       createEvent('tutorial_artifact_persisted', 'Tutorial artifact persisted.', {
+        sequence: 3,
         created_at: '2026-03-10T00:04:00.000Z',
         session_id: 'session_tutorial',
       }),
       createEvent('next_prompt_worker_session_started', 'Next prompt worker session started.', {
+        sequence: 4,
         created_at: '2026-03-10T00:05:00.000Z',
         session_id: 'session_next_prompt',
       }),
       createEvent('next_prompt_artifact_persisted', 'Next prompt artifact persisted.', {
+        sequence: 5,
         created_at: '2026-03-10T00:06:00.000Z',
         session_id: 'session_next_prompt',
       }),
       createEvent('gate_opened', 'Step approval gate opened.', {
+        sequence: 6,
         created_at: '2026-03-10T00:07:00.000Z',
         metadata: {
           definition_gate_id: 'step_approval_gate',
@@ -313,6 +327,10 @@ test('swarm view derives artifact-worker timeline and step gate routing from run
       'Next prompt artifact persisted',
       'Gate opened',
     ],
+  );
+  assert.deepEqual(
+    swarm?.timeline.map((entry) => entry.event_sequence),
+    [1, 2, 3, 4, 5, 6],
   );
   assert.equal(swarm?.timeline[2]?.emphasis, 'marker');
   assert.equal(swarm?.timeline[4]?.emphasis, 'marker');

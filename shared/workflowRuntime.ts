@@ -97,6 +97,7 @@ export const runEventSchema = z.object({
   id: z.string().min(1),
   run_id: z.string().min(1),
   workflow_id: z.string().min(1),
+  sequence: z.number().int().nonnegative().default(0),
   type: z.string().min(1),
   summary: z.string().min(1),
   state_id: z.string().min(1).nullable().default(null),
@@ -351,6 +352,7 @@ export type SwarmCurrentGateView = {
 export type SwarmTimelineEntry = {
   id: string;
   event_id: string;
+  event_sequence: number;
   timestamp: string;
   emphasis: SwarmTimelineEmphasis;
   title: string;

@@ -41,6 +41,19 @@ async function writeJsonMap<T>(filePath: string, records: Record<string, T>) {
   await fs.rename(tempPath, filePath);
 }
 
+function compareRunEvents(a: RunEventRecord, b: RunEventRecord) {
+  if (a.sequence !== b.sequence) {
+    return a.sequence - b.sequence;
+  }
+
+  const timestampOrder = a.created_at.localeCompare(b.created_at);
+  if (timestampOrder !== 0) {
+    return timestampOrder;
+  }
+
+  return a.id.localeCompare(b.id);
+}
+
 export class RunEventStore {
   #filePath: string;
   #writeQueue: Promise<void> = Promise.resolve();
@@ -62,15 +75,43 @@ export class RunEventStore {
     const events = await readJsonMap(this.#filePath, (value) => runEventSchema.parse(value));
     return Object.values(events)
       .filter((event) => event.run_id === runId)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      .sort(compareRunEvents);
   }
 
   async saveEvent(event: RunEventRecord): Promise<RunEventRecord> {
     return await this.#withWriteLock(async () => {
       const events = await readJsonMap(this.#filePath, (value) => runEventSchema.parse(value));
-      events[event.id] = runEventSchema.parse(event);
+      let nextSequence = 0;
+      const runEvents = Object.values(events).filter((existingEvent) => existingEvent.run_id === event.run_id);
+      if (runEvents.some((existingEvent) => existingEvent.sequence === 0)) {
+        for (const existingEvent of [...runEvents].sort((a, b) => {
+          const timestampOrder = a.created_at.localeCompare(b.created_at);
+          if (timestampOrder !== 0) {
+            return timestampOrder;
+          }
+
+          return a.id.localeCompare(b.id);
+        })) {
+          nextSequence += 1;
+          events[existingEvent.id] = runEventSchema.parse({
+            ...existingEvent,
+            sequence: nextSequence,
+          });
+        }
+      } else {
+        nextSequence = runEvents.reduce(
+          (highestSequence, existingEvent) => Math.max(highestSequence, existingEvent.sequence),
+          0,
+        );
+      }
+
+      const persistedEvent = runEventSchema.parse({
+        ...event,
+        sequence: event.sequence > 0 ? event.sequence : nextSequence + 1,
+      });
+      events[persistedEvent.id] = persistedEvent;
       await writeJsonMap(this.#filePath, events);
-      return event;
+      return persistedEvent;
     });
   }
 

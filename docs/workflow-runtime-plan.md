@@ -898,6 +898,12 @@ This is intentionally small. It is enough to:
 
 Because artifact workers can complete concurrently, the JSON-backed runtime stores now serialize mutations per store instance instead of relying on best-effort temp-file writes alone.
 
+## Stable Event Ordering
+
+`RunEventRecord` now carries a persisted per-run `sequence` field.
+
+The runtime assigns this sequence centrally when events are saved, and run history now orders by `sequence` first instead of trusting wall-clock timestamps alone. Timestamps still matter for display, but the event timeline and swarm projection now have a deterministic lifecycle order even when concurrent worker completions land in the same timestamp window.
+
 ## Executable Accepted-Review To Step-Approval Path
 
 The workflow runtime now executes the next real post-review slice:
