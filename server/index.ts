@@ -546,6 +546,7 @@ async function respondToApproval(args: {
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+let shuttingDown = false;
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
@@ -1066,6 +1067,50 @@ if (config.staticDir) {
   });
 }
 
-app.listen(config.port, '127.0.0.1', () => {
+const server = app.listen(config.port, '127.0.0.1', () => {
   console.log(`Inbox server listening on http://127.0.0.1:${config.port}`);
+});
+
+const openSockets = new Set<import('node:net').Socket>();
+server.on('connection', (socket) => {
+  openSockets.add(socket);
+  socket.on('close', () => {
+    openSockets.delete(socket);
+  });
+});
+
+async function shutdown(signal: NodeJS.Signals) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+
+  const forceSocketClose = setTimeout(() => {
+    server.closeAllConnections?.();
+    for (const socket of openSockets) {
+      socket.destroy();
+    }
+  }, 1_000);
+  forceSocketClose.unref?.();
+
+  try {
+    await Promise.allSettled([
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      }),
+      appServer.stop(),
+    ]);
+  } finally {
+    clearTimeout(forceSocketClose);
+  }
+
+  process.exit(0);
+}
+
+process.once('SIGTERM', () => {
+  void shutdown('SIGTERM');
+});
+
+process.once('SIGINT', () => {
+  void shutdown('SIGINT');
 });

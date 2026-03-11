@@ -70,11 +70,29 @@ export class AppServerProcess extends EventEmitter {
     await this.notify('initialized', {});
   }
 
-  async stop() {
+  async stop(args: { gracePeriodMs?: number } = {}) {
     const child = this.#child;
     if (!child) return;
+    const gracePeriodMs = args.gracePeriodMs ?? 2_000;
+    const alreadyExited = child.exitCode !== null || child.signalCode !== null;
+    if (alreadyExited) {
+      return;
+    }
+
+    const exitPromise = new Promise<void>((resolve) => {
+      child.once('exit', () => resolve());
+    });
+
     child.kill('SIGTERM');
-    this.#child = null;
+    const forceTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+    }, gracePeriodMs);
+    forceTimer.unref?.();
+
+    await exitPromise;
+    clearTimeout(forceTimer);
   }
 
   async notify(method: string, params: unknown) {

@@ -108,6 +108,70 @@ function detectPageErrors(output: string) {
   throw new Error(`Browser reported page errors:\n${normalized}`);
 }
 
+async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for child process ${child.pid ?? 'unknown'} to exit.`));
+    }, timeoutMs);
+
+    const onExit = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      child.off('error', onError);
+    };
+
+    child.on('exit', onExit);
+    child.on('error', onError);
+  });
+}
+
+async function stopServerProcess(server: ReturnType<typeof spawn>) {
+  if (server.exitCode !== null || server.signalCode !== null) {
+    return;
+  }
+
+  const signalProcessTree = (signal: NodeJS.Signals) => {
+    if (server.pid == null) {
+      server.kill(signal);
+      return;
+    }
+
+    try {
+      process.kill(-server.pid, signal);
+    } catch {
+      server.kill(signal);
+    }
+  };
+
+  signalProcessTree('SIGTERM');
+  try {
+    await waitForChildExit(server, 5_000);
+    return;
+  } catch {
+    // Escalate below.
+  }
+
+  if (server.exitCode === null && server.signalCode === null) {
+    signalProcessTree('SIGKILL');
+  }
+  await waitForChildExit(server, 5_000).catch(() => undefined);
+}
+
 async function postJson<T>(pathname: string, body?: unknown): Promise<T> {
   const response = await fetch(`${baseUrl}${pathname}`, {
     method: 'POST',
@@ -1343,6 +1407,7 @@ const server = spawn('npm', ['run', 'start'], {
     INBOX_RUNTIME_ROOT: runtimeRoot,
     INBOX_WORKFLOW_PLANNER_TIMEOUT_ONCE_MS: '1',
   },
+  detached: true,
   stdio: 'inherit',
 });
 
@@ -1463,7 +1528,7 @@ try {
 
   detectPageErrors(await runBrowser(['errors'], true));
 } finally {
-  server.kill('SIGTERM');
-  await new Promise((resolve) => server.once('exit', resolve));
+  await runBrowser(['close']).catch(() => undefined);
+  await stopServerProcess(server);
   await fs.rm(validationRoot, { recursive: true, force: true });
 }
